@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VULKAN_VERSION: 1.4.357.0
+
 jobs:
   release:
     runs-on: windows-latest
@@ -33,22 +36,48 @@ jobs:
       - name: Cache cargo and target directory
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.2
+      - name: Cache the Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
         with:
-          version: latest
-          cache: true
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}
 
-      - name: Install Tauri CLI
+      - name: Install the Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkan_sdk.exe?Human=true"
+          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
+          $run = Start-Process .\vulkan_sdk.exe -Wait -PassThru -ArgumentList `
+            "--accept-licenses","--default-answer","--confirm-command","install"
+          if ($run.ExitCode -ne 0) { throw "the Vulkan SDK installer exited with $($run.ExitCode)" }
+          Remove-Item vulkan_sdk.exe
+
+      - name: Point the build at the Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          # The headers and the import library are what CMake's FindVulkan looks for. An
+          # installer that lays down only the loader and bin/ still sets VULKAN_SDK, and
+          # then fails 25 minutes later inside ggml-vulkan instead of here.
+          foreach ($needed in "$sdk\Include\vulkan\vulkan.h", "$sdk\Lib\vulkan-1.lib") {
+            if (-not (Test-Path $needed)) { throw "the Vulkan SDK at $sdk is incomplete: $needed is missing" }
+          }
+          "VULKAN_SDK=$sdk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
-
-      - name: Run workspace tests
-        run: cargo test --workspace --release
 
       - name: Build and bundle
         run: .\scripts\build.ps1 -Bundle
 
+      - name: Run workspace tests
+        run: cargo test --workspace --release
+
       - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           draft: true
