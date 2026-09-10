@@ -1,0 +1,30 @@
+# Build output
+/target
+node_modules
+/ui/dist
+
+# Toolchain fetched by scripts/, not vendored
+/.tools
+
+# Model weights. Tens of gigabytes, fetched by scripts/fetch-models.ps1.
+/models
+
+# Captured audio. Recordings made by `lathe-spike accuracy` are somebody's voice and
+# stay on the machine that made them.
+*.wav
+/recordings
+/recordings-pl
+
+# ...except the fixed reference clip, which the benchmark measures against and which
+# worker.rs embeds with include_bytes!. Without it the build does not compile.
+!/assets/jfk.wav
+
+# Runtime output
+*.log
+lathe.out
+
+# Local scratch
+/cue-audition
+
+# Working notes, not published
+/docs

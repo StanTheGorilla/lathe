@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the settings window. It only talks to the core over the commands defined in this crate, so nothing beyond the base set is granted.",
+  "windows": ["settings"],
+  "permissions": ["core:default"]
+}

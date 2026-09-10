@@ -1,0 +1,7 @@
+so I am like almost sure that we are missing something because I've been using the Super Whisper app and it has cohere transcript in it so there must be a way to use it not only it had it but it was really fast so
+okay so I see that this is not bad from the folder app but I have a few things firstly add the third thing if it will just completely put the app out of window managers like komorebi so it is just not used by them
+I've noticed that you picked small quantization from the smaller models like Superwhisper models I don't think we need Q4 we easily could fit Q8 or even BF16 which is a bigger model
+so for cleanup in English the Superwhisper model is used right
+now that it's working one thing that I noticed is that the mute thing doesn't work but badly so when I click I still hear the audio from a video playing in the background and it isn't muted it is just lower down
+I wanted to rework the vocabulary because in Superwhisper it just worked that you added a word and all that you did not add like a word and then what should it be replaced
+the thing that I forgot to mention in the first prompt is also that I would like you to add a thing that will mute other sounds like videos and music when I am talking to the app

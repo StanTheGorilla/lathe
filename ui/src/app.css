@@ -1,0 +1,368 @@
+/* Brief section 8. One accent colour in normal use; blue and green are status only.
+   No gradients, no shadows beyond a 1px border, 4px radius throughout, and no animation
+   beyond 120ms opacity and colour. */
+
+:root {
+  --ink: #141413;
+  --paper: #faf9f5;
+  --stone: #e8e6dc;
+  --ash: #b0aea5;
+  --clay: #d97757;
+  --slate-blue: #6a9bcc;
+  --moss: #788c5d;
+
+  --surface: var(--paper);
+  --surface-sunken: var(--stone);
+  --text: var(--ink);
+  --text-dim: #6b6a63;
+  --border: #d8d5c8;
+
+  --radius: 4px;
+  --rail-width: 168px;
+
+  /* Native, not web. Segoe UI Variable is the Windows 11 UI face. */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --font-serif: Lora, Georgia, serif;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #1c1c1a;
+    --surface-sunken: #262624;
+    --text: #ecebe4;
+    --text-dim: #9a988e;
+    --border: #35342f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--surface);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+#app {
+  height: 100vh;
+}
+
+/* Layout: a left rail of five sections, and one pane. No tabs inside sections. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-width) 1fr;
+  height: 100%;
+}
+
+.rail {
+  background: var(--surface-sunken);
+  border-right: 1px solid var(--border);
+  padding: 20px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 20px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color 120ms, background-color 120ms;
+}
+
+.rail-item:hover {
+  color: var(--text);
+}
+
+.rail-item[aria-current="true"] {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.rail-item svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-foot {
+  padding: 0 20px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.pane {
+  padding: 24px;
+  overflow-y: auto;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 0 0 22px;
+  color: var(--text-dim);
+  max-width: 62ch;
+}
+
+h2 {
+  margin: 26px 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Labels sit above their controls, left aligned, never beside. */
+.field {
+  margin-bottom: 18px;
+  max-width: 460px;
+}
+
+.field > label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 500;
+}
+
+.hint {
+  margin-top: 5px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 120ms;
+}
+
+textarea {
+  font-family: var(--font-mono);
+  resize: vertical;
+  min-height: 130px;
+  user-select: text;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 1px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  user-select: text;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--clay);
+}
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--ash);
+}
+
+button.primary {
+  background: var(--clay);
+  border-color: var(--clay);
+  color: #fff;
+}
+
+button:disabled {
+  color: var(--ash);
+  cursor: default;
+}
+
+/* Brief 5.4: four stops, because the model has four trained values. */
+.stops {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stops button {
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface-sunken);
+  padding: 7px 4px;
+  text-align: center;
+}
+
+.stops button:last-child {
+  border-right: 0;
+}
+
+.stops button[aria-pressed="true"] {
+  background: var(--clay);
+  color: #fff;
+}
+
+.example {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--clay);
+  background: var(--surface-sunken);
+  color: var(--text-dim);
+  user-select: text;
+}
+
+.preset-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.preset-tabs button[aria-pressed="true"] {
+  border-color: var(--clay);
+  color: var(--clay);
+}
+
+.status {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.status.ok {
+  border-color: var(--moss);
+  color: var(--moss);
+}
+
+.status.info {
+  border-color: var(--slate-blue);
+  color: var(--slate-blue);
+}
+
+.status.bad {
+  border-color: var(--clay);
+  color: var(--clay);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+/* Brief 5.7: the level meter is the only acceptable real-time visual, and it exists
+   only here in settings. */
+.meter {
+  height: 6px;
+  border-radius: 2px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.meter div {
+  height: 100%;
+  background: var(--moss);
+  transition: width 80ms linear;
+}
+
+.savebar {
+  position: sticky;
+  bottom: 0;
+  margin: 24px -24px -24px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* A caption for something that is not a form control, styled like a label. */
+.field > .pseudo-label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 500;
+}

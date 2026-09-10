@@ -1,0 +1,11 @@
+# Polish reference sentences for `lathe-spike accuracy --lang pl`.
+#
+# Separate from the English set because the recogniser takes one language per run, and
+# scoring Polish speech under an English language code measures nothing useful.
+#
+# Lines starting with # are ignored. Blank lines are ignored.
+
+# -- Polish, including the English technical words that get declined into Polish grammar.
+Muszę jeszcze raz przejrzeć ten moduł autoryzacji.
+Zrobiłem refactor tego komponentu, ale testy nie przechodzą.
+Wysłałem Grzegorzowi wiadomość o wdrożeniu w Zblewie.

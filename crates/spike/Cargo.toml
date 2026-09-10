@@ -1,0 +1,14 @@
+[package]
+name = "lathe-spike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+lathe-core = { path = "../core" }
+# Static, matching lathe-core: see the note there and amendment A14. Cargo unifies
+# features across the workspace, so "dynamic-link" here would silently make the app
+# binary dynamic too, and its ggml would collide with CrispASR's.
+llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }

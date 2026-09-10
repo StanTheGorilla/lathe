@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/spike", "crates/lathe", "crates/cohere-probe"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Release profile per Amendments A2 and A4.
+# opt-level 3, not "z": hot-path time is inside ggml's C++, which cmake optimizes
+# independently. "z" would only deoptimize the Rust-side resampling and vocabulary passes.
+# panic unwind, not "abort": the error cue in section 5.2 is the only failure channel
+# the user has, and abort would kill the process before it could sound.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

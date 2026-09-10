@@ -1,0 +1,27 @@
+[package]
+name = "lathe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+lathe-core = { path = "../core" }
+llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "custom-protocol"] }
+tauri-plugin-single-instance = "2"
+tauri-winrt-notification = "0.8"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+]

@@ -1,0 +1,18 @@
+[package]
+name = "cohere-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+hound = "3.5.1"
+crispasr = { git = "https://github.com/CrispStrobe/CrispASR", tag = "v0.8.31", features = ["vulkan"] }
+# Static on purpose, and this is the point of the probe. CrispASR always builds its ggml
+# as ggml-base.dll / ggml-cpu.dll / ggml-vulkan.dll / ggml.dll, which are exactly the
+# filenames llama.cpp's dynamic-link build produces. Two different ggml builds cannot
+# share those names in one directory. Linking llama statically means it emits no DLLs at
+# all: its ggml lives inside the executable, CrispASR's lives in the DLLs, and the two
+# are separate modules that never resolve to each other.
+llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }

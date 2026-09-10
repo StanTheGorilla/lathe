@@ -1,0 +1,35 @@
+# Reference sentences for `lathe-spike accuracy`.
+#
+# Read each one aloud exactly as written. The point is to measure the recogniser, so the
+# set is weighted toward what actually goes wrong in this app rather than toward easy
+# prose: the project's own jargon, proper nouns the model has never met, version numbers,
+# file paths, and the English-inside-Polish case.
+#
+# Lines starting with # are ignored. Blank lines are ignored.
+
+# -- Ordinary prose, the baseline. If these are wrong, something is badly off.
+I think we should ship it on Friday if the tests pass.
+Can you check the pull request I opened yesterday?
+The whole thing is spread across three different files and it makes it hard to follow.
+
+# -- Product and project names. These are the words a vocabulary is supposed to protect,
+#    and the ones that cost the most when they land wrong.
+I asked Claude to look at the auth module.
+Lathe uses Cohere Transcribe for speech and S1-mini for cleanup.
+CrispASR runs the Silero model on the CPU.
+We are using Tauri and Svelte for the settings window.
+The Vulkan backend is faster than the CPU one on this card.
+I talked to Grzegorz about the Zblewo deployment.
+Anthropic released Opus and Sonnet on the same day.
+
+# -- Identifiers, paths and numbers. Cleanup formats these well; the question is whether
+#    the recogniser hears them at all.
+The error is in auth dot rs line two hundred and forty seven.
+It is in the src slash components slash header dot tsx file.
+We need to bump it from three point two to four point oh point one.
+Call get underscore user by id and check if it returns none.
+Send the invoice to john dot smith at gmail dot com by Friday.
+
+# -- Disfluency. The recogniser must hear the false start; dropping it is cleanup's job.
+Let us do it on Tuesday, actually no, Wednesday works better.
+So I was thinking, um, we could maybe do the migration this weekend.
