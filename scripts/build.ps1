@@ -59,7 +59,12 @@ $env:PATH = "$root\.tools;$env:USERPROFILE\.cargo\bin;$env:PATH"
 $env:CMAKE_GENERATOR = 'Ninja'
 
 if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw 'cl.exe not on PATH after vcvars' }
-if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { throw 'ninja.exe not found; see scripts/README or re-fetch into .tools' }
+if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+    # Both whisper.cpp and llama.cpp build their Vulkan shader compiler as a nested
+    # CMake ExternalProject, and MSBuild's generated batch files break on the long paths
+    # cargo produces. Ninja is not optional here.
+    throw 'ninja.exe not found. Install it with "winget install Ninja-build.Ninja", or put ninja.exe in .tools\ next to this checkout.'
+}
 if (-not $env:VULKAN_SDK) { throw 'VULKAN_SDK is not set; the Vulkan SDK is required, see brief section 1' }
 
 Set-Location $root
