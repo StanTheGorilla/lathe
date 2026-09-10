@@ -101,6 +101,38 @@ function Copy-CrispAsrRuntime {
     if ($copied -gt 0) { Write-Host "copied $copied CrispASR runtime dll(s) to $profileDir" }
 }
 
+function Copy-MsvcRuntime {
+    # Everything here is built with MSVC and imports MSVCP140, VCRUNTIME140,
+    # VCRUNTIME140_1 and VCOMP140 (the OpenMP runtime ggml's CPU backend uses). Windows
+    # does not ship those -- they arrive with the Visual C++ redistributable, which a
+    # clean install has never seen, and without them the app dies at launch with a
+    # missing-DLL box that tells the user nothing. Microsoft's redistributable licence
+    # permits shipping them beside the executable, which is cheaper for the user than a
+    # second installer.
+    if (-not $env:VCToolsRedistDir) {
+        Write-Warning 'VCToolsRedistDir is not set; the C++ runtime will not be bundled.'
+        return
+    }
+
+    $desktopX64 = Join-Path $env:VCToolsRedistDir 'x64'
+    $copied = 0
+    foreach ($name in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'vcomp140.dll') {
+        # Not the onecore\ variants: those target OneCore/Server, not desktop Windows.
+        $src = Get-ChildItem -Path $desktopX64 -Recurse -Filter $name -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $src) {
+            Write-Warning "$name not found under $desktopX64; a clean machine may not start the app."
+            continue
+        }
+        $target = Join-Path $profileDir $src.Name
+        if (-not (Test-Path $target) -or (Get-Item $target).LastWriteTimeUtc -lt $src.LastWriteTimeUtc) {
+            Copy-Item $src.FullName $target -Force
+            $copied++
+        }
+    }
+    if ($copied -gt 0) { Write-Host "copied $copied C++ runtime dll(s) to $profileDir" }
+}
+
 # The DLLs have to sit beside the executable *before* the lathe crate is compiled, not
 # merely before it is bundled: tauri.conf.json ships them as bundle resources, and
 # tauri-build resolves that glob while the crate's build script runs. On a fresh clone
@@ -116,11 +148,13 @@ if (-not $Dev) { $coreArgv.Add('--release') }
 & cargo $coreArgv
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Copy-CrispAsrRuntime -Quiet
+Copy-MsvcRuntime
 
 & cargo $cargoArgv
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Copy-CrispAsrRuntime
+Copy-MsvcRuntime
 
 if ($Bundle) {
     if ($Dev) { throw '-Bundle needs a release build; drop -Dev' }
