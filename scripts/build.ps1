@@ -139,6 +139,23 @@ function Copy-MsvcRuntime {
 # nothing has put them there yet and the build dies with "glob pattern
 # ../../target/release/*.dll path not found or didn't match any files". So build the
 # crate that produces them first, stage them, then build the rest.
+# tauri::generate_context! reads frontendDist while the lathe crate compiles, so the
+# settings window has to be built before cargo runs at all -- not merely before
+# bundling, which is the only time tauri.conf.json's beforeBuildCommand fires. A fresh
+# clone has no ui/dist, and the failure surfaces as a panic inside a proc macro that
+# never mentions npm.
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    throw 'npm not found; Node.js is required to build the settings window'
+}
+
+$uiDir = Join-Path $root 'ui'
+if (-not (Test-Path (Join-Path $uiDir 'node_modules'))) {
+    & npm --prefix $uiDir ci
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+& npm --prefix $uiDir run build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 $coreArgv = [System.Collections.Generic.List[string]]::new()
 $coreArgv.Add('build')
 $coreArgv.Add('-p')
