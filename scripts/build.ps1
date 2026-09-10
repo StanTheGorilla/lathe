@@ -70,19 +70,26 @@ $cargoArgv.Add('build')
 if (-not $Dev) { $cargoArgv.Add('--release') }
 foreach ($a in $CargoArgs) { if ($null -ne $a) { $cargoArgv.Add([string]$a) } }
 
-& cargo $cargoArgv
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
 # CrispASR builds itself as a set of DLLs inside the cargo OUT_DIR, and the executable
 # will not start without them on PATH or beside it. llama.cpp is linked statically
 # precisely so its ggml does not produce files with the same names; see amendment A14.
 $profileDir = Join-Path $root ($(if ($Dev) { 'target\debug' } else { 'target\release' }))
-$crispBin = Get-ChildItem -Path (Join-Path $profileDir 'build') -Directory -Filter 'crispasr-sys-*' -ErrorAction SilentlyContinue |
-    ForEach-Object { Join-Path $_.FullName 'out\crispasr-build\bin' } |
-    Where-Object { Test-Path $_ } |
-    Select-Object -First 1
 
-if ($crispBin) {
+function Copy-CrispAsrRuntime {
+    param([switch]$Quiet)
+
+    $crispBin = Get-ChildItem -Path (Join-Path $profileDir 'build') -Directory -Filter 'crispasr-sys-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'out\crispasr-build\bin' } |
+        Where-Object { Test-Path $_ } |
+        Select-Object -First 1
+
+    if (-not $crispBin) {
+        if (-not $Quiet) {
+            Write-Warning 'CrispASR build output not found; the binary will not start without its DLLs.'
+        }
+        return
+    }
+
     $copied = 0
     foreach ($dll in Get-ChildItem (Join-Path $crispBin '*.dll')) {
         $target = Join-Path $profileDir $dll.Name
@@ -92,9 +99,28 @@ if ($crispBin) {
         }
     }
     if ($copied -gt 0) { Write-Host "copied $copied CrispASR runtime dll(s) to $profileDir" }
-} else {
-    Write-Warning 'CrispASR build output not found; the binary will not start without its DLLs.'
 }
+
+# The DLLs have to sit beside the executable *before* the lathe crate is compiled, not
+# merely before it is bundled: tauri.conf.json ships them as bundle resources, and
+# tauri-build resolves that glob while the crate's build script runs. On a fresh clone
+# nothing has put them there yet and the build dies with "glob pattern
+# ../../target/release/*.dll path not found or didn't match any files". So build the
+# crate that produces them first, stage them, then build the rest.
+$coreArgv = [System.Collections.Generic.List[string]]::new()
+$coreArgv.Add('build')
+$coreArgv.Add('-p')
+$coreArgv.Add('lathe-core')
+if (-not $Dev) { $coreArgv.Add('--release') }
+
+& cargo $coreArgv
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Copy-CrispAsrRuntime -Quiet
+
+& cargo $cargoArgv
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Copy-CrispAsrRuntime
 
 if ($Bundle) {
     if ($Dev) { throw '-Bundle needs a release build; drop -Dev' }
