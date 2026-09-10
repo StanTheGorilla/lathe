@@ -42,6 +42,10 @@ pub struct Adapter {
     name: String,
     vram_free: usize,
     vram_total: usize,
+    /// "discrete", "integrated", "cpu" or "other", so the picker can say which is which.
+    kind: String,
+    /// True for the one automatic selection would choose.
+    preferred: bool,
 }
 
 #[derive(Serialize)]
@@ -80,13 +84,17 @@ pub async fn list_devices() -> Reply<Devices> {
 }
 
 fn enumerate() -> Reply<Devices> {
-    let adapters = lathe_core::asr::list_adapters()
-        .into_iter()
-        .map(|(id, name, vram_total)| Adapter {
-            id,
-            name,
+    let found = lathe_core::asr::list_adapters();
+    let preferred = lathe_core::asr::best_adapter(&found).map(|a| a.id);
+    let adapters = found
+        .iter()
+        .map(|a| Adapter {
+            id: a.id,
+            name: a.name.clone(),
             vram_free: 0,
-            vram_total,
+            vram_total: a.vram_total,
+            kind: a.kind.label().to_string(),
+            preferred: Some(a.id) == preferred,
         })
         .collect();
 
@@ -380,6 +388,120 @@ pub fn start_download(file: String, state: State<'_, AppState>) -> Reply<()> {
             }
         }
     });
+
+    Ok(())
+}
+
+/// What a change of models directory would have to move.
+#[derive(Serialize)]
+pub struct MovePlan {
+    files: u32,
+    bytes: u64,
+    /// True when the chosen directory is the one already in use.
+    same: bool,
+}
+
+#[tauri::command]
+pub fn plan_models_move(to: String, state: State<'_, AppState>) -> Reply<MovePlan> {
+    let from = state.config.lock().unwrap().models.dir.clone();
+    let to = std::path::PathBuf::from(to);
+    if from == to {
+        return Ok(MovePlan {
+            files: 0,
+            bytes: 0,
+            same: true,
+        });
+    }
+    let present = lathe_core::download::present_in(&from);
+    Ok(MovePlan {
+        files: present.len() as u32,
+        bytes: present.iter().map(|(_, size)| *size).sum(),
+        same: false,
+    })
+}
+
+/// Opens the native folder picker. Returns None if the user dismissed it.
+#[tauri::command]
+pub async fn pick_models_dir(app: tauri::AppHandle, current: String) -> Reply<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = mpsc::channel();
+    let mut picker = app.dialog().file().set_title("Where to keep the models");
+    let start = std::path::PathBuf::from(&current);
+    if start.is_dir() {
+        picker = picker.set_directory(start);
+    }
+    picker.pick_folder(move |chosen| {
+        let _ = tx.send(chosen);
+    });
+
+    let chosen = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .map_err(fail)?;
+
+    Ok(chosen
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string()))
+}
+
+/// Points the app at a new models directory, optionally moving what is already there.
+///
+/// The directory is validated by creating it, the same way the downloader does: asking
+/// the filesystem is the only honest test of whether a path is writable.
+#[tauri::command]
+pub fn set_models_dir(dir: String, move_existing: bool, state: State<'_, AppState>) -> Reply<()> {
+    let to = std::path::PathBuf::from(&dir);
+    if to.as_os_str().is_empty() {
+        return Err("choose a folder first".into());
+    }
+    std::fs::create_dir_all(&to)
+        .map_err(|e| format!("{} cannot be used: {e}", to.display()))?;
+
+    let from = state.config.lock().unwrap().models.dir.clone();
+    if from == to {
+        return Ok(());
+    }
+
+    if move_existing {
+        let running = state.download.lock().unwrap();
+        if running.as_ref().is_some_and(|p| !p.finished) {
+            return Err("wait for the download in progress to finish first".into());
+        }
+    }
+
+    let mut config = state.config.lock().unwrap().clone();
+    config.models.dir = to.clone();
+    save_config(config, state.clone())?;
+
+    if move_existing {
+        let shared = std::sync::Arc::clone(&state.download);
+        let cancel = std::sync::Arc::clone(&state.download_cancel);
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        *shared.lock().unwrap() = Some(DownloadProgress::default());
+
+        std::thread::spawn(move || {
+            let cancel_flag = std::sync::Arc::clone(&cancel);
+            let result = lathe_core::download::relocate(
+                &from,
+                &to,
+                |file, done, total| {
+                    if let Some(p) = shared.lock().unwrap().as_mut() {
+                        p.file = file.to_string();
+                        p.done = done;
+                        p.total = total;
+                    }
+                },
+                &move || cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
+            );
+
+            if let Some(p) = shared.lock().unwrap().as_mut() {
+                p.finished = true;
+                if let Err(e) = result {
+                    p.error = format!("{e:#}");
+                }
+            }
+        });
+    }
 
     Ok(())
 }

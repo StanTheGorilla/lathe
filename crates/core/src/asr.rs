@@ -234,11 +234,206 @@ fn detect(path: &str) -> Result<String> {
     })
 }
 
+/// What ggml reports a compute device as. Ordering matters: see `best_adapter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterKind {
+    Discrete,
+    Integrated,
+    Cpu,
+    Other,
+}
+
+impl AdapterKind {
+    fn rank(self) -> u8 {
+        match self {
+            AdapterKind::Discrete => 0,
+            AdapterKind::Integrated => 1,
+            AdapterKind::Other => 2,
+            AdapterKind::Cpu => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AdapterKind::Discrete => "discrete",
+            AdapterKind::Integrated => "integrated",
+            AdapterKind::Cpu => "cpu",
+            AdapterKind::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Adapter {
+    pub id: i32,
+    pub name: String,
+    pub vram_total: usize,
+    pub kind: AdapterKind,
+}
+
 /// Vulkan adapters, for the picker in brief 4.1.
-pub fn list_adapters() -> Vec<(i32, String, usize)> {
+pub fn list_adapters() -> Vec<Adapter> {
+    use llama_cpp_2::LlamaBackendDeviceType as T;
     llama_cpp_2::list_llama_ggml_backend_devices()
         .into_iter()
         .enumerate()
-        .map(|(i, d)| (i as i32, d.description, d.memory_total))
+        .map(|(i, d)| Adapter {
+            id: i as i32,
+            name: d.description,
+            vram_total: d.memory_total,
+            kind: match d.device_type {
+                T::Gpu => AdapterKind::Discrete,
+                T::IntegratedGpu => AdapterKind::Integrated,
+                T::Cpu => AdapterKind::Cpu,
+                _ => AdapterKind::Other,
+            },
+        })
         .collect()
+}
+
+/// The device to use when the config asks for automatic selection.
+///
+/// Discrete cards first, then integrated, then anything that is not the CPU, with more
+/// memory winning within a class. ggml's own order is whatever the driver enumerated,
+/// which on a machine with both a discrete and an integrated GPU is often the
+/// integrated one -- the common NVIDIA laptop, where index 0 is the Intel chip.
+/// Sorting by memory alone would be worse still: the CPU device reports system RAM,
+/// which on this machine is three times the card's VRAM.
+pub fn best_adapter(adapters: &[Adapter]) -> Option<&Adapter> {
+    adapters
+        .iter()
+        .min_by_key(|a| (a.kind.rank(), std::cmp::Reverse(a.vram_total)))
+}
+
+/// A device that exists, resolved from whatever the config asked for.
+#[derive(Debug, Clone)]
+pub struct Gpu {
+    pub device: i32,
+    pub name: String,
+    /// False when the chosen device is the CPU, where offloading layers is meaningless.
+    pub offload: bool,
+}
+
+/// Turns `models.gpu_device` into a device that is actually present.
+///
+/// A negative index means automatic. A positive one that no longer matches anything --
+/// a config copied from a machine with more GPUs, or a card that has been removed --
+/// falls back to automatic rather than failing the dictation.
+pub fn resolve_gpu(requested: i32) -> Gpu {
+    resolve_among(requested, &list_adapters())
+}
+
+fn resolve_among(requested: i32, adapters: &[Adapter]) -> Gpu {
+    let chosen = adapters.iter().find(|a| a.id == requested).or_else(|| {
+        if requested >= 0 {
+            eprintln!(
+                "gpu device {requested} is not present ({} found); choosing automatically",
+                adapters.len()
+            );
+        }
+        best_adapter(adapters)
+    });
+
+    match chosen {
+        Some(a) => Gpu {
+            device: a.id,
+            name: a.name.clone(),
+            offload: a.kind != AdapterKind::Cpu,
+        },
+        // ggml always registers a CPU device, so this is unreachable in practice.
+        None => Gpu {
+            device: 0,
+            name: "CPU".into(),
+            offload: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter(id: i32, name: &str, mib: usize, kind: AdapterKind) -> Adapter {
+        Adapter {
+            id,
+            name: name.into(),
+            vram_total: mib * 1024 * 1024,
+            kind,
+        }
+    }
+
+    /// The common NVIDIA laptop: the integrated chip enumerates first, and picking
+    /// index 0 hands the work to the wrong device.
+    #[test]
+    fn prefers_discrete_over_integrated() {
+        let found = [
+            adapter(0, "Intel UHD Graphics", 2048, AdapterKind::Integrated),
+            adapter(1, "NVIDIA GeForce RTX 4060", 8192, AdapterKind::Discrete),
+        ];
+        assert_eq!(best_adapter(&found).unwrap().id, 1);
+    }
+
+    /// Even when the integrated one claims more memory, which it can: shared memory is
+    /// reported as system RAM.
+    #[test]
+    fn discrete_wins_on_kind_not_size() {
+        let found = [
+            adapter(0, "Radeon Graphics", 24370, AdapterKind::Integrated),
+            adapter(1, "Radeon RX 6600 XT", 8176, AdapterKind::Discrete),
+        ];
+        assert_eq!(best_adapter(&found).unwrap().id, 1);
+    }
+
+    #[test]
+    fn cpu_is_never_chosen_over_a_gpu() {
+        let found = [
+            adapter(0, "Radeon RX 6600 XT", 8176, AdapterKind::Discrete),
+            adapter(1, "Ryzen 7 5700G", 24370, AdapterKind::Cpu),
+        ];
+        assert_eq!(best_adapter(&found).unwrap().id, 0);
+    }
+
+    #[test]
+    fn largest_card_wins_between_two_of_a_kind() {
+        let found = [
+            adapter(0, "RTX 3060", 12288, AdapterKind::Discrete),
+            adapter(1, "RTX 4090", 24576, AdapterKind::Discrete),
+        ];
+        assert_eq!(best_adapter(&found).unwrap().id, 1);
+    }
+
+    #[test]
+    fn cpu_only_machine_runs_without_offloading() {
+        let found = [adapter(0, "Ryzen 7 5700G", 24370, AdapterKind::Cpu)];
+        let gpu = resolve_among(-1, &found);
+        assert_eq!(gpu.device, 0);
+        assert!(!gpu.offload, "layers must not be offloaded to the CPU device");
+    }
+
+    /// A config carried from a machine with more GPUs than this one has.
+    #[test]
+    fn stale_index_falls_back_instead_of_failing() {
+        let found = [
+            adapter(0, "Intel UHD Graphics", 2048, AdapterKind::Integrated),
+            adapter(1, "NVIDIA GeForce RTX 4060", 8192, AdapterKind::Discrete),
+        ];
+        let gpu = resolve_among(7, &found);
+        assert_eq!(gpu.device, 1);
+        assert!(gpu.offload);
+    }
+
+    #[test]
+    fn an_explicit_choice_is_honoured() {
+        let found = [
+            adapter(0, "Intel UHD Graphics", 2048, AdapterKind::Integrated),
+            adapter(1, "NVIDIA GeForce RTX 4060", 8192, AdapterKind::Discrete),
+        ];
+        assert_eq!(resolve_among(0, &found).device, 0);
+    }
+
+    #[test]
+    fn no_devices_at_all_still_yields_something_runnable() {
+        let gpu = resolve_among(-1, &[]);
+        assert!(!gpu.offload);
+    }
 }

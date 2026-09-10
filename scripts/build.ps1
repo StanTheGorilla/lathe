@@ -29,8 +29,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$vcvars = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+if ($env:VCVARS64 -and (Test-Path $env:VCVARS64)) {
+    $vcvars = $env:VCVARS64
+} else {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsPath = $null
+    if (Test-Path $vswhere) {
+        $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    }
+    if ($vsPath) {
+        $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+    } else {
+        $vcvars = $null
+    }
+    if (-not $vcvars -or -not (Test-Path $vcvars)) {
+        throw 'vcvars64.bat not found. Install Visual Studio Build Tools with the "Desktop development with C++" workload, or set $env:VCVARS64 to the full path of vcvars64.bat.'
+    }
+}
 
 # Pull the MSVC environment into this session. cmd is the only thing that can read
 # vcvars, so run it there and import the resulting variables.

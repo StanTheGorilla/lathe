@@ -226,6 +226,7 @@ fn run(args: &[String]) -> Result<()> {
         .unwrap_or_else(|| "unbound".to_string());
 
     let tap_threshold = Duration::from_millis(config.tap_threshold_ms);
+    let hotkey_mode = Arc::new(Mutex::new(config.hotkey_mode));
     let preset_names: Vec<String> = config.presets.iter().map(|p| p.name.clone()).collect();
 
     let config = Arc::new(Mutex::new(config));
@@ -279,8 +280,9 @@ fn run(args: &[String]) -> Result<()> {
                 }
             }
         });
+        let mode_for_hook = Arc::clone(&hotkey_mode);
         std::thread::spawn(move || {
-            hotkey::run(bindings, tap_threshold, hotkey_tx);
+            hotkey::run(bindings, mode_for_hook, tap_threshold, hotkey_tx);
         });
     }
 
@@ -302,6 +304,7 @@ fn run(args: &[String]) -> Result<()> {
         // One instance only. Two copies would install two keyboard hooks and handle
         // every hotkey twice, and would fight over the microphone. A second launch
         // forwards its arguments here and exits.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if argv.iter().any(|a| a == "--settings") {
                 open_settings(app);
@@ -328,6 +331,9 @@ fn run(args: &[String]) -> Result<()> {
             commands::download_progress,
             commands::cancel_download,
             commands::start_download,
+            commands::plan_models_move,
+            commands::pick_models_dir,
+            commands::set_models_dir,
             commands::last_hotkey,
         ])
         .setup(move |app| {
@@ -339,7 +345,12 @@ fn run(args: &[String]) -> Result<()> {
                 rx: worker_rx,
             });
 
-            watch_config(config_path, Arc::clone(&config), app.handle().clone());
+            watch_config(
+                config_path,
+                Arc::clone(&config),
+                Arc::clone(&hotkey_mode),
+                app.handle().clone(),
+            );
 
             if open_settings_at_start {
                 open_settings(app.handle());
@@ -463,7 +474,12 @@ pub fn open_settings(app: &AppHandle) {
 }
 
 /// Applies reloads coming from the config file watcher.
-fn watch_config(path: std::path::PathBuf, config: Arc<Mutex<Config>>, app: AppHandle) {
+fn watch_config(
+    path: std::path::PathBuf,
+    config: Arc<Mutex<Config>>,
+    hotkey_mode: Arc<Mutex<lathe_core::hotkey::Mode>>,
+    app: AppHandle,
+) {
     let reloads = lathe_core::config::watch(path);
     std::thread::spawn(move || {
         for result in reloads {
@@ -472,6 +488,9 @@ fn watch_config(path: std::path::PathBuf, config: Arc<Mutex<Config>>, app: AppHa
                     let mut current = config.lock().unwrap();
                     let hotkey_changed = current.hotkey != reloaded.hotkey
                         || current.paste_raw_hotkey != reloaded.paste_raw_hotkey;
+                    // The bindings themselves still need a restart, but the press style
+                    // is read live by the state machine.
+                    *hotkey_mode.lock().unwrap() = reloaded.hotkey_mode;
                     *current = reloaded;
                     drop(current);
                     eprintln!("config reloaded");
@@ -500,9 +519,18 @@ pub fn notify_user(title: &str, body: &str) {
 
 /// Brief 4.1 and 5.7: the adapter picker and the device dropdowns need names.
 fn print_devices() -> Result<()> {
-    println!("compute adapters (ggml order, discrete first):");
-    for (id, name, total) in lathe_core::asr::list_adapters() {
-        println!("  {id}: {name} -- {} MiB", total / (1024 * 1024));
+    let adapters = lathe_core::asr::list_adapters();
+    let best = lathe_core::asr::best_adapter(&adapters).map(|a| a.id);
+    println!("compute adapters:");
+    for a in &adapters {
+        let mark = if Some(a.id) == best { " <- automatic" } else { "" };
+        println!(
+            "  {}: {} [{}] -- {} MiB{mark}",
+            a.id,
+            a.name,
+            a.kind.label(),
+            a.vram_total / (1024 * 1024)
+        );
     }
     println!();
     lathe_core::audio::list_devices()?;

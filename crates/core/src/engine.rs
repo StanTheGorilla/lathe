@@ -44,6 +44,9 @@ pub struct Engine {
     /// Without it every non-English dictation would retry the load, and pay the warmup
     /// behind it, for a file that is still absent.
     cleanup_multilingual_missing: bool,
+    /// Resolved once per process. Enumerating adapters initialises the Vulkan backend,
+    /// and the answer cannot change while the app is running.
+    gpu: Option<crate::asr::Gpu>,
     last_used: Instant,
 }
 
@@ -57,8 +60,27 @@ impl Engine {
             cleanup: None,
             cleanup_multilingual: None,
             cleanup_multilingual_missing: false,
+            gpu: None,
             last_used: Instant::now(),
         })
+    }
+
+    /// The device index and layer count to load a cleanup model with.
+    ///
+    /// Zero layers when the chosen device is the CPU: offloading 999 layers to a device
+    /// that cannot take them is how a machine with no usable GPU fails today.
+    fn gpu(slot: &mut Option<crate::asr::Gpu>, requested: i32) -> (i32, u32) {
+        let gpu = slot.get_or_insert_with(|| {
+            let gpu = crate::asr::resolve_gpu(requested);
+            eprintln!(
+                "cleanup model on device {} '{}' ({})",
+                gpu.device,
+                gpu.name,
+                if gpu.offload { "offloading" } else { "cpu only" }
+            );
+            gpu
+        });
+        (gpu.device, if gpu.offload { 999 } else { 0 })
     }
 
     /// Whether everything *this language* needs is resident.
@@ -108,12 +130,13 @@ impl Engine {
 
         if english && self.cleanup.is_none() {
             progress("Loading cleanup model");
+            let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
             let backend = Self::backend_mut(&mut self.backend)?;
             let (cleanup, ms) = Cleanup::load(
                 backend,
                 &config.cleanup_path(),
-                config.models.gpu_device,
-                999,
+                device,
+                layers,
                 crate::cleanup::Flavour::S1Mini,
             )?;
             eprintln!("s1-mini loaded in {ms}ms");
@@ -124,12 +147,13 @@ impl Engine {
             let path = config.cleanup_multilingual_path();
             if path.exists() {
                 progress("Loading multilingual cleanup model");
+                let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
                 let backend = Self::backend_mut(&mut self.backend)?;
                 let (cleanup, ms) = Cleanup::load(
                     backend,
                     &path,
-                    config.models.gpu_device,
-                    999,
+                    device,
+                    layers,
                     crate::cleanup::Flavour::Instruct,
                 )?;
                 eprintln!("multilingual cleanup model loaded in {ms}ms");

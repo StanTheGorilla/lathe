@@ -188,3 +188,246 @@ pub fn fetch(
         .with_context(|| format!("moving into place: {}", final_path.display()))?;
     Ok(())
 }
+
+/// The known model files sitting in `dir`, with their sizes.
+pub fn present_in(dir: &Path) -> Vec<(&'static Known, u64)> {
+    KNOWN
+        .iter()
+        .filter_map(|k| {
+            let size = std::fs::metadata(dir.join(k.file)).ok()?.len();
+            Some((k, size))
+        })
+        .collect()
+}
+
+/// Moves every known model file from `from` into `to`, reporting bytes moved overall.
+///
+/// `std::fs::rename` is instant within a volume and fails across one, which is the case
+/// that matters: choosing a models directory is usually about getting several gigabytes
+/// off the system drive. The fallback copies and only unlinks the source once the copy
+/// has landed, so an interrupted move can never destroy the only copy of a 2GB file.
+///
+/// Files already present at the destination are left alone rather than overwritten.
+pub fn relocate(
+    from: &Path,
+    to: &Path,
+    mut progress: impl FnMut(&'static str, u64, u64),
+    cancel: &dyn Fn() -> bool,
+) -> Result<u32> {
+    if from == to {
+        return Ok(0);
+    }
+
+    let items = present_in(from);
+    let total: u64 = items.iter().map(|(_, size)| *size).sum();
+    let mut done = 0u64;
+    let mut moved = 0u32;
+
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+
+    for (entry, size) in items {
+        if cancel() {
+            return Err(anyhow!("move cancelled"));
+        }
+
+        let src = from.join(entry.file);
+        let dst = to.join(entry.file);
+
+        if dst.exists() {
+            done += size;
+            progress(entry.file, done, total);
+            continue;
+        }
+
+        progress(entry.file, done, total);
+
+        if std::fs::rename(&src, &dst).is_err() {
+            copy_across(&src, &dst, size, done, total, &mut progress, cancel, entry.file)?;
+            std::fs::remove_file(&src)
+                .with_context(|| format!("removing {} after the copy", src.display()))?;
+        }
+
+        done += size;
+        moved += 1;
+        progress(entry.file, done, total);
+    }
+
+    Ok(moved)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_across(
+    src: &Path,
+    dst: &Path,
+    size: u64,
+    base: u64,
+    total: u64,
+    progress: &mut impl FnMut(&'static str, u64, u64),
+    cancel: &dyn Fn() -> bool,
+    label: &'static str,
+) -> Result<()> {
+    let part = dst.with_extension("part");
+    let mut reader =
+        std::fs::File::open(src).with_context(|| format!("opening {}", src.display()))?;
+    let mut writer =
+        std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
+
+    let mut buffer = vec![0u8; 4 << 20];
+    let mut copied = 0u64;
+    loop {
+        if cancel() {
+            drop(writer);
+            let _ = std::fs::remove_file(&part);
+            return Err(anyhow!("move cancelled"));
+        }
+        let read = reader.read(&mut buffer).context("reading the model file")?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .with_context(|| format!("writing {}", part.display()))?;
+        copied += read as u64;
+        progress(label, base + copied, total);
+    }
+
+    writer.flush()?;
+    drop(writer);
+
+    if copied < size {
+        let _ = std::fs::remove_file(&part);
+        return Err(anyhow!(
+            "{label} copied short: {copied} bytes of {size}; the original is untouched"
+        ));
+    }
+
+    std::fs::rename(&part, dst).with_context(|| format!("moving into place: {}", dst.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("lathe-relocate-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, bytes: usize) {
+        std::fs::write(dir.join(name), vec![7u8; bytes]).unwrap();
+    }
+
+    const A_MODEL: &str = "cohere-transcribe-q8_0.gguf";
+    const ANOTHER: &str = "ggml-silero-v5.1.2.bin";
+
+    fn never() -> impl Fn() -> bool {
+        || false
+    }
+
+    #[test]
+    fn moves_known_files_and_leaves_nothing_behind() {
+        let from = scratch("from");
+        let to = scratch("to");
+        write(&from, A_MODEL, 2048);
+        write(&from, ANOTHER, 512);
+        write(&from, "notes.txt", 10);
+
+        let moved = relocate(&from, &to, |_, _, _| {}, &never()).unwrap();
+
+        assert_eq!(moved, 2);
+        assert!(to.join(A_MODEL).exists());
+        assert!(to.join(ANOTHER).exists());
+        assert!(!from.join(A_MODEL).exists());
+        // Files the app does not know about are not its business to move.
+        assert!(from.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn an_existing_file_at_the_destination_is_not_overwritten() {
+        let from = scratch("from");
+        let to = scratch("to");
+        write(&from, A_MODEL, 2048);
+        write(&to, A_MODEL, 4096);
+
+        relocate(&from, &to, |_, _, _| {}, &never()).unwrap();
+
+        assert_eq!(std::fs::metadata(to.join(A_MODEL)).unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn moving_a_directory_onto_itself_does_nothing() {
+        let dir = scratch("same");
+        write(&dir, A_MODEL, 100);
+        assert_eq!(relocate(&dir, &dir, |_, _, _| {}, &never()).unwrap(), 0);
+        assert!(dir.join(A_MODEL).exists());
+    }
+
+    #[test]
+    fn progress_reaches_the_total_it_promised() {
+        let from = scratch("from");
+        let to = scratch("to");
+        write(&from, A_MODEL, 2048);
+        write(&from, ANOTHER, 512);
+
+        let mut last = (0u64, 0u64);
+        relocate(&from, &to, |_, done, total| last = (done, total), &never()).unwrap();
+        assert_eq!(last, (2560, 2560));
+    }
+
+    /// The cross-volume path, which `rename` cannot take. Exercised directly because a
+    /// test cannot rely on a second drive existing.
+    #[test]
+    fn the_copy_fallback_moves_bytes_faithfully() {
+        let from = scratch("from");
+        let to = scratch("to");
+        write(&from, A_MODEL, 5000);
+
+        let mut seen = 0u64;
+        copy_across(
+            &from.join(A_MODEL),
+            &to.join(A_MODEL),
+            5000,
+            0,
+            5000,
+            &mut |_, done, _| seen = done,
+            &never(),
+            A_MODEL,
+        )
+        .unwrap();
+
+        assert_eq!(seen, 5000);
+        assert_eq!(std::fs::read(to.join(A_MODEL)).unwrap(), vec![7u8; 5000]);
+        // The source is only unlinked by the caller, after the copy has landed.
+        assert!(from.join(A_MODEL).exists());
+    }
+
+    #[test]
+    fn a_cancelled_copy_leaves_no_half_file_and_keeps_the_original() {
+        let from = scratch("from");
+        let to = scratch("to");
+        write(&from, A_MODEL, 5000);
+
+        let err = copy_across(
+            &from.join(A_MODEL),
+            &to.join(A_MODEL),
+            5000,
+            0,
+            5000,
+            &mut |_, _, _| {},
+            &|| true,
+            A_MODEL,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cancelled"));
+        assert!(!to.join(A_MODEL).exists());
+        assert!(!to.join(A_MODEL).with_extension("part").exists());
+        assert!(from.join(A_MODEL).exists());
+    }
+}

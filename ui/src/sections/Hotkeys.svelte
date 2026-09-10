@@ -132,8 +132,34 @@
   <p class="hint">Rescues a dictation when cleanup mangles something.</p>
 </div>
 
+<h2>Press style</h2>
+
+<div class="field">
+  <label for="mode">What the dictate key does</label>
+  <select
+    id="mode"
+    value={config.hotkey_mode}
+    onchange={(e) => { config.hotkey_mode = e.currentTarget.value; onchange(); }}
+  >
+    <option value="auto">Decide from the press &mdash; tap latches, hold talks</option>
+    <option value="hold">Hold to talk</option>
+    <option value="toggle">Tap to start, tap again to stop</option>
+  </select>
+  <p class="hint">
+    {#if config.hotkey_mode === "hold"}
+      Records only while the key is down. Releasing it always stops.
+    {:else if config.hotkey_mode === "toggle"}
+      One press starts, the next one stops. Holding the key makes no difference.
+    {:else}
+      A press shorter than the threshold below latches recording on until the next
+      press; a longer one records only while held.
+    {/if}
+  </p>
+</div>
+
 <h2>Timing</h2>
 
+{#if config.hotkey_mode === "auto"}
 <div class="field">
   <label for="tap">Tap threshold (ms)</label>
   <input
@@ -146,6 +172,7 @@
   />
   <p class="hint">Presses shorter than this latch. Longer presses are push-to-talk.</p>
 </div>
+{/if}
 
 <div class="field">
   <label for="cap">Maximum recording length (seconds)</label>

@@ -22,3 +22,7 @@ export const downloadProgress = () => invoke("download_progress");
 export const startDownload = (file) => invoke("start_download", { file });
 export const cancelDownload = () => invoke("cancel_download");
 export const lastHotkey = () => invoke("last_hotkey");
+export const pickModelsDir = (current) => invoke("pick_models_dir", { current });
+export const planModelsMove = (to) => invoke("plan_models_move", { to });
+export const setModelsDir = (dir, moveExisting) =>
+  invoke("set_models_dir", { dir, moveExisting });

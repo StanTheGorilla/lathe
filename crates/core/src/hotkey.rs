@@ -10,7 +10,7 @@
 
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -21,6 +21,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
+
+/// How the dictate binding behaves.
+///
+/// Brief 5.1 chose `Auto` and deliberately offered no setting. It is still the default,
+/// but the threshold surprises people who only ever do one of the two: a slow hold gets
+/// read as a hold, a hurried one as a tap, and nothing on screen explains the
+/// difference. `Hold` and `Toggle` each commit to one behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// A press shorter than the threshold latches; a longer one is push-to-talk.
+    #[default]
+    Auto,
+    /// Records only while the key is held, whatever the press length.
+    Hold,
+    /// Press to start, press again to stop. Releasing the key does nothing.
+    Toggle,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -181,7 +199,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 ///
 /// A WH_KEYBOARD_LL hook only delivers events to a thread that pumps messages, so this
 /// owns a thread for the lifetime of the process.
-pub fn run(mut bindings: Vec<Bound>, tap_threshold: Duration, events: Sender<Event>) {
+pub fn run(
+    mut bindings: Vec<Bound>,
+    mode: Arc<Mutex<Mode>>,
+    tap_threshold: Duration,
+    events: Sender<Event>,
+) {
     // Most modifiers first. Without this, a binding of Ctrl+Space registered before
     // Ctrl+Shift+Space would swallow the latter, since the hook takes the first match.
     bindings.sort_by_key(|b| {
@@ -196,7 +219,7 @@ pub fn run(mut bindings: Vec<Bound>, tap_threshold: Duration, events: Sender<Eve
     let _ = BINDINGS.set(bindings.clone());
 
     std::thread::spawn(move || {
-        state_machine(bindings, tap_threshold, raw_rx, events);
+        state_machine(bindings, mode, tap_threshold, raw_rx, events);
     });
 
     unsafe {
@@ -214,12 +237,12 @@ pub fn run(mut bindings: Vec<Bound>, tap_threshold: Duration, events: Sender<Eve
     }
 }
 
-/// Brief 5.1: one binding, two behaviors, no mode setting.
-///
-/// A press shorter than the threshold latches recording on until the next press. A
-/// longer press records only while held.
+/// One binding, three possible behaviours; see `Mode`.
+/// `mode` is shared rather than copied: changing the press style in settings has to
+/// take effect without restarting the app, or it reads as the setting doing nothing.
 fn state_machine(
     bindings: Vec<Bound>,
+    mode: Arc<Mutex<Mode>>,
     tap_threshold: Duration,
     raw: std::sync::mpsc::Receiver<RawKey>,
     events: Sender<Event>,
@@ -256,6 +279,8 @@ fn state_machine(
             _ => None,
         };
 
+        let mode = *mode.lock().unwrap();
+
         if event.down {
             if down_binding == Some(event.which) {
                 continue;
@@ -278,9 +303,14 @@ fn state_machine(
                         }
                     );
                     let _ = events.send(Event::Start { preset });
-                    State::Pressed {
-                        at: Instant::now(),
-                        which: event.which,
+                    // Toggle latches immediately, so the release below finds no
+                    // `Pressed` state and is ignored.
+                    match mode {
+                        Mode::Toggle => State::Latched,
+                        _ => State::Pressed {
+                            at: Instant::now(),
+                            which: event.which,
+                        },
                     }
                 }
                 other => other,
@@ -293,7 +323,12 @@ fn state_machine(
                     state = State::Pressed { at, which };
                     continue;
                 }
-                state = if at.elapsed() >= tap_threshold {
+                let hold = match mode {
+                    Mode::Hold => true,
+                    Mode::Toggle => false,
+                    Mode::Auto => at.elapsed() >= tap_threshold,
+                };
+                state = if hold {
                     let _ = events.send(Event::Stop);
                     State::Idle
                 } else {
@@ -329,4 +364,112 @@ pub fn describe(b: &Binding) -> String {
             .unwrap_or_else(|| format!("0x{k:02X}")),
     });
     parts.join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THRESHOLD: Duration = Duration::from_millis(400);
+
+    fn bound() -> Vec<Bound> {
+        vec![Bound {
+            binding: Binding {
+                ctrl: true,
+                key: 0x20,
+                ..Default::default()
+            },
+            action: Action::Record,
+        }]
+    }
+
+    /// Drives the state machine with a script of (down, pause-after) and collects what
+    /// it emitted. The pause is real time, because the auto mode measures real time.
+    fn play(mode: Mode, script: &[(bool, Duration)]) -> Vec<Event> {
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            state_machine(bound(), Arc::new(Mutex::new(mode)), THRESHOLD, raw_rx, ev_tx);
+        });
+
+        for (down, pause) in script {
+            raw_tx.send(RawKey { which: 0, down: *down }).unwrap();
+            std::thread::sleep(*pause);
+        }
+        drop(raw_tx);
+        worker.join().unwrap();
+
+        ev_rx.into_iter().collect()
+    }
+
+    const NONE: Duration = Duration::from_millis(0);
+    const BRIEF: Duration = Duration::from_millis(20);
+    const LONG: Duration = Duration::from_millis(500);
+
+    fn start() -> Event {
+        Event::Start { preset: None }
+    }
+
+    #[test]
+    fn auto_reads_a_long_press_as_push_to_talk() {
+        let events = play(Mode::Auto, &[(true, LONG), (false, BRIEF)]);
+        assert_eq!(events, vec![start(), Event::Stop]);
+    }
+
+    #[test]
+    fn auto_reads_a_quick_tap_as_a_latch() {
+        // Press and release quickly: recording stays on, so only Start so far.
+        let events = play(Mode::Auto, &[(true, NONE), (false, BRIEF)]);
+        assert_eq!(events, vec![start()]);
+    }
+
+    #[test]
+    fn auto_stops_a_latched_recording_on_the_next_press() {
+        let events = play(
+            Mode::Auto,
+            &[(true, NONE), (false, BRIEF), (true, NONE), (false, BRIEF)],
+        );
+        assert_eq!(events, vec![start(), Event::Stop]);
+    }
+
+    /// The complaint that produced the mode setting: a hurried hold gets latched, and
+    /// the user is left recording with no idea why.
+    #[test]
+    fn hold_stops_on_release_even_when_the_press_was_quick() {
+        let events = play(Mode::Hold, &[(true, NONE), (false, BRIEF)]);
+        assert_eq!(events, vec![start(), Event::Stop]);
+    }
+
+    #[test]
+    fn hold_stops_on_release_after_a_long_press_too() {
+        let events = play(Mode::Hold, &[(true, LONG), (false, BRIEF)]);
+        assert_eq!(events, vec![start(), Event::Stop]);
+    }
+
+    #[test]
+    fn toggle_ignores_the_release_however_long_the_press() {
+        let events = play(Mode::Toggle, &[(true, LONG), (false, BRIEF)]);
+        assert_eq!(events, vec![start()], "a held key must not stop a toggle");
+    }
+
+    #[test]
+    fn toggle_stops_on_the_second_press() {
+        let events = play(
+            Mode::Toggle,
+            &[(true, NONE), (false, BRIEF), (true, NONE), (false, BRIEF)],
+        );
+        assert_eq!(events, vec![start(), Event::Stop]);
+    }
+
+    /// Key repeat fires a stream of key-downs while a key is held. Only the first is a
+    /// press, or a held toggle would start and stop dozens of times a second.
+    #[test]
+    fn key_repeat_does_not_retrigger() {
+        let events = play(
+            Mode::Toggle,
+            &[(true, NONE), (true, NONE), (true, NONE), (false, BRIEF)],
+        );
+        assert_eq!(events, vec![start()]);
+    }
 }

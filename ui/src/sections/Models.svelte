@@ -8,6 +8,10 @@
     downloadProgress,
     startDownload,
     cancelDownload,
+    loadConfig,
+    pickModelsDir,
+    planModelsMove,
+    setModelsDir,
   } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
@@ -21,6 +25,8 @@
   let progress = $state(null);
   let showFiles = $state(false);
   let poll = null;
+  let movePlan = $state(null);
+  let movingTo = $state("");
 
   const busy = $derived(!!progress && !progress.finished);
   const pct = (p) => (p.total ? Math.round((p.done / p.total) * 100) : 0);
@@ -119,19 +125,25 @@
     }
   }
 
+  function pollProgress(onFinished) {
+    poll = setInterval(async () => {
+      progress = await downloadProgress();
+      if (progress && progress.finished) {
+        clearInterval(poll);
+        poll = null;
+        await onFinished();
+      }
+    }, 400);
+  }
+
   async function download(file) {
     error = "";
     try {
       await startDownload(file);
-      poll = setInterval(async () => {
-        progress = await downloadProgress();
-        if (progress && progress.finished) {
-          clearInterval(poll);
-          poll = null;
-          await refreshDownloads();
-          status = await modelStatus();
-        }
-      }, 400);
+      pollProgress(async () => {
+        await refreshDownloads();
+        status = await modelStatus();
+      });
     } catch (e) {
       error = String(e);
     }
@@ -140,6 +152,48 @@
   async function cancel() {
     try {
       await cancelDownload();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function refreshAfterDirChange() {
+    config = await loadConfig();
+    status = await modelStatus();
+    await refreshDownloads();
+  }
+
+  async function changeDir() {
+    error = "";
+    try {
+      const chosen = await pickModelsDir(status.dir);
+      if (!chosen) return;
+      const plan = await planModelsMove(chosen);
+      if (plan.same) return;
+      if (plan.files === 0) {
+        await setModelsDir(chosen, false);
+        await refreshAfterDirChange();
+        return;
+      }
+      movingTo = chosen;
+      movePlan = plan;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function moveFiles(move) {
+    error = "";
+    const to = movingTo;
+    movePlan = null;
+    movingTo = "";
+    try {
+      await setModelsDir(to, move);
+      if (move) {
+        pollProgress(refreshAfterDirChange);
+      } else {
+        await refreshAfterDirChange();
+      }
     } catch (e) {
       error = String(e);
     }
@@ -166,32 +220,29 @@
     {#each options as o}
       {@const chosen = config.models[field] === o.file}
       {@const have = present(o.file)}
-      <button
-        class="choice"
-        aria-pressed={chosen}
-        onclick={() => choose(field, o.file)}
-        disabled={!have && !chosen}
-      >
-        <span class="choice-head">
-          <span class="choice-name">{o.label}</span>
-          <span class="choice-size mono">{o.size}</span>
-        </span>
-        <span class="choice-note">{o.note}</span>
-        {#if !have}
-          <span class="choice-missing">
-            Not downloaded.
-            <button
-              class="inline"
-              disabled={busy}
-              onclick={(e) => { e.stopPropagation(); download(o.file); }}
-            >
-              {progress && progress.file === o.file && !progress.finished
-                ? `${pct(progress)}%`
-                : "Get it"}
-            </button>
+      {@const downloading = progress && progress.file === o.file && !progress.finished}
+      <div class="choice" class:picked={chosen}>
+        <button
+          class="choice-pick"
+          aria-pressed={chosen}
+          onclick={() => choose(field, o.file)}
+          disabled={!have && !chosen}
+        >
+          <span class="choice-head">
+            <span class="choice-name">{o.label}</span>
+            <span class="choice-size mono">{o.size}</span>
           </span>
+          <span class="choice-note">{o.note}</span>
+        </button>
+        {#if !have}
+          <p class="choice-missing">
+            {downloading ? `Downloading -- ${pct(progress)}%` : "Not downloaded."}
+            <button class="inline" disabled={busy} onclick={() => download(o.file)}>
+              {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : "Get it"}
+            </button>
+          </p>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
 {/snippet}
@@ -232,17 +283,77 @@
   <div class="status bad" style="margin-top:12px">{progress.error}</div>
 {/if}
 
+<h2>Storage</h2>
+<p class="hint" style="margin:-6px 0 10px">
+  Where the weights are kept. Several gigabytes of them, so a drive with room is a
+  reasonable choice. Changing this offers to bring what you have already downloaded.
+</p>
+
+<div class="field">
+  <span class="pseudo-label">Folder</span>
+  <div class="row">
+    <span class="mono" style="overflow-wrap:anywhere">{status ? status.dir : "—"}</span>
+    <button onclick={changeDir}>Change&hellip;</button>
+  </div>
+</div>
+
+{#if movePlan}
+  <div class="status bad">
+    Move {movePlan.files} file{movePlan.files === 1 ? "" : "s"} ({gb(movePlan.bytes)} GB) to
+    the new folder?
+    <div class="row" style="margin-top:8px">
+      <button class="primary" onclick={() => moveFiles(true)}>Move</button>
+      <button onclick={() => moveFiles(false)}>Leave them</button>
+    </div>
+  </div>
+{/if}
+
+<button class="disclose" aria-expanded={showFiles} onclick={() => (showFiles = !showFiles)}>
+  {showFiles ? "Hide" : "Show"} files
+  {#if status}
+    <span class="hint" style="margin:0">
+      {status.files.length} tracked, {gb(status.total_bytes)} GB
+      {#if status.files.some((f) => !f.present)}
+        <span style="color:var(--clay)">&mdash; one is missing</span>
+      {/if}
+    </span>
+  {/if}
+</button>
+
+{#if showFiles && status}
+  <table style="margin-top:10px">
+    <thead>
+      <tr><th>Role</th><th>File</th><th>Size</th><th>State</th></tr>
+    </thead>
+    <tbody>
+      {#each status.files as f}
+        <tr>
+          <td>{f.role}</td>
+          <td class="mono">{f.name}</td>
+          <td>{f.present ? `${mb(f.size)} MB` : "--"}</td>
+          <td style="color:{f.present ? 'var(--moss)' : 'var(--clay)'}">
+            {f.present ? "present" : "missing"}
+          </td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+{/if}
+
 <h2>Hardware</h2>
 
 <div class="field">
   <label for="gpu">Graphics adapter</label>
   <select
     id="gpu"
-    value={config.models.gpu_device}
+    value={config.models.gpu_device < 0 ? -1 : config.models.gpu_device}
     onchange={(e) => { config.models.gpu_device = +e.currentTarget.value; onchange(); }}
   >
+    <option value={-1}>
+      Automatic{#if adapters.some((a) => a.preferred)} ({adapters.find((a) => a.preferred).name}){/if}
+    </option>
     {#each adapters as a}
-      <option value={a.id}>{a.name} -- {mb(a.vram_total)} MB</option>
+      <option value={a.id}>{a.name} -- {a.kind}, {mb(a.vram_total)} MB</option>
     {/each}
   </select>
   <p class="hint">
@@ -303,40 +414,6 @@
       <tr><td>Realtime factor</td><td class="mono">{bench.realtime_factor.toFixed(1)}x</td></tr>
     </tbody>
   </table>
-{/if}
-
-<h2>Files on disk</h2>
-<button class="disclose" aria-expanded={showFiles} onclick={() => (showFiles = !showFiles)}>
-  {showFiles ? "Hide" : "Show"}
-  {#if status}
-    <span class="hint" style="margin:0">
-      {status.files.length} tracked, {gb(status.total_bytes)} GB
-      {#if status.files.some((f) => !f.present)}
-        <span style="color:var(--clay)">&mdash; one is missing</span>
-      {/if}
-    </span>
-  {/if}
-</button>
-
-{#if showFiles && status}
-  <table style="margin-top:10px">
-    <thead>
-      <tr><th>Role</th><th>File</th><th>Size</th><th>State</th></tr>
-    </thead>
-    <tbody>
-      {#each status.files as f}
-        <tr>
-          <td>{f.role}</td>
-          <td class="mono">{f.name}</td>
-          <td>{f.present ? `${mb(f.size)} MB` : "--"}</td>
-          <td style="color:{f.present ? 'var(--moss)' : 'var(--clay)'}">
-            {f.present ? "present" : "missing"}
-          </td>
-        </tr>
-      {/each}
-    </tbody>
-  </table>
-  <p class="hint">Directory: <span class="mono">{status.dir}</span></p>
 {/if}
 
 <h2>External endpoint</h2>
@@ -423,19 +500,30 @@
     margin-bottom: 8px;
   }
 
+  /* A card, not a button: the "Get it" control lives inside it, and a button nested in
+     a button is invalid HTML whose clicks the disabled outer one swallows. */
   .choice {
-    display: block;
-    width: 100%;
-    text-align: left;
     padding: 9px 11px;
     background: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
   }
 
-  .choice[aria-pressed="true"] {
+  .choice.picked {
     border-color: var(--clay);
   }
 
-  .choice:disabled {
+  .choice-pick {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+  }
+
+  .choice-pick:disabled {
     opacity: 0.65;
   }
 
@@ -449,7 +537,7 @@
     font-weight: 500;
   }
 
-  .choice[aria-pressed="true"] .choice-name {
+  .choice.picked .choice-name {
     color: var(--clay);
   }
 
@@ -466,10 +554,9 @@
   }
 
   .choice-missing {
-    display: block;
     color: var(--text-dim);
     font-size: 12px;
-    margin-top: 5px;
+    margin: 5px 0 0;
   }
 
   .inline {

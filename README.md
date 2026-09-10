@@ -7,13 +7,6 @@
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/licence-MIT-788c5d?style=flat-square&labelColor=35342f"></a>
 </p>
 
-Hold `Ctrl+Space`, talk, let go. What you said is punctuated, tidied and pasted into
-whatever window you were already in.
-
-Everything runs on your own GPU. No account, no telemetry, no network calls.
-
----
-
 ## Why this exists
 
 Superwhisper and the rest charge a subscription to run a model on hardware you already

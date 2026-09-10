@@ -479,8 +479,14 @@ fn main() -> Result<()> {
 
 fn print_vulkan() -> Result<()> {
     println!("compute adapters (ggml order, discrete first):");
-    for (id, name, total) in asr::list_adapters() {
-        println!("  {id}: {name} -- {} MiB", total / (1024 * 1024));
+    for a in asr::list_adapters() {
+        println!(
+            "  {}: {} [{}] -- {} MiB",
+            a.id,
+            a.name,
+            a.kind.label(),
+            a.vram_total / (1024 * 1024)
+        );
     }
     Ok(())
 }

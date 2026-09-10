@@ -24,6 +24,9 @@ pub struct Config {
     pub hotkey: String,
     /// Brief 5.6: re-paste the last transcript pre-cleanup.
     pub paste_raw_hotkey: String,
+    /// Whether the dictate binding is push-to-talk, a toggle, or decided by how long
+    /// the press lasted. `tap_threshold_ms` only applies to the last of those.
+    pub hotkey_mode: crate::hotkey::Mode,
     /// Brief 5.1: a press shorter than this toggles, longer is push-to-talk.
     pub tap_threshold_ms: u64,
     /// Brief 5.1: hard cap so a stuck key cannot fill RAM.
@@ -68,6 +71,9 @@ pub struct Models {
     /// Cleanup for languages S1-mini does not cover. Optional; see amendment A21.
     pub cleanup_multilingual: String,
     /// Vulkan adapter index, brief 4.1. Enumerated names are printed by `lathe devices`.
+    /// Negative means automatic: prefer a discrete card over an integrated one rather
+    /// than trusting ggml's enumeration order. An index that is not present falls back
+    /// to automatic.
     pub gpu_device: i32,
     pub threads: i32,
     /// Brief 4.4: free VRAM after this long idle. Zero disables unloading.
@@ -203,7 +209,7 @@ impl Default for Models {
             // Losing meaning is not worth the 111ms. See amendment A23.
             cleanup: "s1-mini-f16.gguf".into(),
             cleanup_multilingual: "gemma-3-4b-it-qat-Q4_0.gguf".into(),
-            gpu_device: 0,
+            gpu_device: -1,
             threads: std::thread::available_parallelism()
                 .map(|n| n.get() as i32)
                 .unwrap_or(8),
@@ -240,6 +246,7 @@ impl Default for Config {
         Self {
             hotkey: "Ctrl+Space".into(),
             paste_raw_hotkey: "Ctrl+Shift+Space".into(),
+            hotkey_mode: crate::hotkey::Mode::Auto,
             tap_threshold_ms: 400,
             max_record_secs: 300,
             active_preset: "Prompt".into(),
