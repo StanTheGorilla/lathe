@@ -116,4 +116,4 @@ scripts/             build, model download, asset generation
 MIT. See [LICENSE](LICENSE).
 
 Model weights are downloaded separately and carry their own licences — Cohere
-Transcribe, S1-mini, Gemma 3 and Silero VAD each have their own terms.
+Transcribe, S1-mini, Gemma 4 and Silero VAD each have their own terms.

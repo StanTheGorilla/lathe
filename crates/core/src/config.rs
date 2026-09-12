@@ -207,11 +207,14 @@ impl Default for Models {
             // slower and 1.6GB larger for no observable gain. See amendment A23.
             whisper: "cohere-transcribe-q8_0.gguf".into(),
             vad: "ggml-silero-v5.1.2.bin".into(),
-            // F16, not Q4_K_M. Q4 was observed dropping a clause outright -- "send me the
-            // file when you get a chance" came back without "when you get a chance".
-            // Losing meaning is not worth the 111ms. See amendment A23.
-            cleanup: "s1-mini-f16.gguf".into(),
-            cleanup_multilingual: "gemma-3-4b-it-qat-Q4_0.gguf".into(),
+            // Q8_0. Q4_K_M was observed dropping a clause outright (amendment A23); Q8_0
+            // reproduces F16 on 94-95% of dictations with no content loss found, at half
+            // the size and twice the decode speed. Half the size also matters for fitting
+            // beside the speech model on an 8 GB card. Amendment A27.
+            cleanup: "s1-mini-q8_0.gguf".into(),
+            // Gemma 4 E2B over Gemma 3 4B: fewer errors and content losses on Polish,
+            // same speed, and only ~1 GB of it lives in graphics memory. Amendment A28.
+            cleanup_multilingual: "gemma-4-E2B_q4_0-it.gguf".into(),
             gpu_device: -1,
             threads: std::thread::available_parallelism()
                 .map(|n| n.get() as i32)

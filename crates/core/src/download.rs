@@ -38,12 +38,15 @@ pub const KNOWN: &[Known] = &[
         approx_bytes: 928_000,
         required: true,
     },
+    // Q8_0 is not published upstream; this is our own conversion of their F16, with
+    // their LICENSE and NOTICE alongside. Amendment A27: identical to F16 on 94-95% of
+    // dictations, no content loss found, half the size, twice the decode speed.
     Known {
-        file: "s1-mini-f16.gguf",
-        label: "S1-mini F16",
+        file: "s1-mini-q8_0.gguf",
+        label: "S1-mini Q8_0",
         role: "Cleanup, English",
-        url: "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-f16.gguf",
-        approx_bytes: 1_515_000_000,
+        url: "https://huggingface.co/stanthegorilla/S1-mini-Q8_0-GGUF/resolve/main/s1-mini-q8_0.gguf",
+        approx_bytes: 805_000_000,
         required: true,
     },
     // Brief 4.2 requires these to ship alongside the model.
@@ -80,6 +83,14 @@ pub const KNOWN: &[Known] = &[
         required: false,
     },
     Known {
+        file: "s1-mini-f16.gguf",
+        label: "S1-mini F16 (full precision)",
+        role: "Cleanup, alternative",
+        url: "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-f16.gguf",
+        approx_bytes: 1_515_000_000,
+        required: false,
+    },
+    Known {
         file: "s1-mini-q4_k_m.gguf",
         label: "S1-mini Q4_K_M (smaller)",
         role: "Cleanup, alternative",
@@ -96,9 +107,17 @@ pub const KNOWN: &[Known] = &[
         required: false,
     },
     Known {
-        file: "gemma-3-4b-it-qat-Q4_0.gguf",
-        label: "Gemma 3 4B (multilingual cleanup)",
+        file: "gemma-4-E2B_q4_0-it.gguf",
+        label: "Gemma 4 E2B (multilingual cleanup)",
         role: "Cleanup, non-English",
+        url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        approx_bytes: 3_350_000_000,
+        required: false,
+    },
+    Known {
+        file: "gemma-3-4b-it-qat-Q4_0.gguf",
+        label: "Gemma 3 4B QAT Q4_0 (previous default)",
+        role: "Cleanup non-English, alternative",
         url: "https://huggingface.co/ggml-org/gemma-3-4b-it-qat-GGUF/resolve/main/gemma-3-4b-it-qat-Q4_0.gguf",
         approx_bytes: 2_530_000_000,
         required: false,

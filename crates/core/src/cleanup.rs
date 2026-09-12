@@ -80,6 +80,36 @@ impl Context {
 pub struct Cleanup {
     model: LlamaModel,
     flavour: Flavour,
+    turns: Turns,
+}
+
+/// How an instruction model marks the turns of a conversation. Read off the model's
+/// architecture at load, because the two Gemma generations differ and a prompt in the
+/// wrong markup is silently treated as ordinary text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turns {
+    /// Gemma 3: `<start_of_turn>user` ... `<end_of_turn>`.
+    Gemma3,
+    /// Gemma 4: `<|turn>user` ... `<turn|>`. Thinking is off unless the system turn
+    /// asks for it, and nothing here does.
+    Gemma4,
+}
+
+impl Turns {
+    fn for_architecture(arch: &str) -> Self {
+        match arch {
+            "gemma4" | "gemma4-assistant" => Turns::Gemma4,
+            _ => Turns::Gemma3,
+        }
+    }
+
+    /// One user turn holding `body`, then the opening of the model's reply.
+    fn wrap(self, body: &str) -> String {
+        match self {
+            Turns::Gemma3 => format!("<start_of_turn>user\n{body}<end_of_turn>\n<start_of_turn>model\n"),
+            Turns::Gemma4 => format!("<|turn>user\n{body}<turn|>\n<|turn>model\n"),
+        }
+    }
 }
 
 pub struct Cleaned {
@@ -140,6 +170,17 @@ pub fn build_instruct_prompt(
     structure: Structure,
     context: Context,
 ) -> String {
+    build_instruct_prompt_for(Turns::Gemma3, raw, language, styling, structure, context)
+}
+
+pub fn build_instruct_prompt_for(
+    turns: Turns,
+    raw: &str,
+    language: &str,
+    styling: Styling,
+    structure: Structure,
+    context: Context,
+) -> String {
     let tone = match styling {
         Styling::Casual => "casual and relaxed, as in a message to a friend",
         Styling::SemiCasual => "relaxed but tidy",
@@ -181,9 +222,8 @@ pub fn build_instruct_prompt(
     //   - No worked example, though few-shot would normally be the strongest lever: any
     //     example is written in *some* language, and one in English measurably pulls
     //     non-English output toward English.
-    format!(
-        "<start_of_turn>user\n\
-         Correct the punctuation and spelling of a dictated transcript. It is in \
+    let body = format!(
+        "Correct the punctuation and spelling of a dictated transcript. It is in \
          {language}.\n\n\
          Rules, in order of importance:\n\
          1. Output the corrected transcript and nothing else: no preamble, no \
@@ -206,9 +246,9 @@ pub fn build_instruct_prompt(
          9. If only filler remains after rule 5, output nothing at all.\n\n\
          ----- BEGIN TRANSCRIPT -----\n\
          {raw}\n\
-         ----- END TRANSCRIPT -----<end_of_turn>\n\
-         <start_of_turn>model\n"
-    )
+         ----- END TRANSCRIPT -----"
+    );
+    turns.wrap(&body)
 }
 
 impl Cleanup {
@@ -230,8 +270,11 @@ impl Cleanup {
         let start = Instant::now();
         let model = LlamaModel::load_from_file(backend, model_path, &params)?;
         let load_ms = start.elapsed().as_millis();
+        let turns = Turns::for_architecture(
+            &model.meta_val_str("general.architecture").unwrap_or_default(),
+        );
 
-        Ok((Self { model, flavour }, load_ms))
+        Ok((Self { model, flavour, turns }, load_ms))
     }
 
     pub fn normalize(
@@ -248,7 +291,7 @@ impl Cleanup {
         let prompt = match self.flavour {
             Flavour::S1Mini => build_prompt(raw, styling, structure, context),
             Flavour::Instruct => {
-                build_instruct_prompt(raw, language, styling, structure, context)
+                build_instruct_prompt_for(self.turns, raw, language, styling, structure, context)
             }
         };
         // Gemma-style models expect a BOS token and behave poorly without one -- the
@@ -339,3 +382,21 @@ impl Cleanup {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instruct_prompt_uses_the_markup_of_the_model_generation() {
+        let g3 = build_instruct_prompt_for(Turns::Gemma3, "x", "Polish", Styling::Formal, Structure::Prose, Context::General);
+        assert!(g3.starts_with("<start_of_turn>user\n"));
+        assert!(g3.ends_with("<end_of_turn>\n<start_of_turn>model\n"));
+        let g4 = build_instruct_prompt_for(Turns::Gemma4, "x", "Polish", Styling::Formal, Structure::Prose, Context::General);
+        assert!(g4.starts_with("<|turn>user\n"));
+        assert!(g4.ends_with("<turn|>\n<|turn>model\n"));
+        assert!(!g4.contains("<start_of_turn>"));
+        assert_eq!(Turns::for_architecture("gemma4"), Turns::Gemma4);
+        assert_eq!(Turns::for_architecture("gemma3"), Turns::Gemma3);
+    }
+}

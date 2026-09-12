@@ -64,9 +64,15 @@
 
   const CLEANUP = [
     {
+      file: "s1-mini-q8_0.gguf",
+      label: "S1-mini  Q8_0",
+      note: "Recommended. Word-for-word identical to F16 on 19 dictations in 20, never dropped content, half the size and twice the decode speed.",
+      size: "0.75 GB",
+    },
+    {
       file: "s1-mini-f16.gguf",
       label: "S1-mini  F16",
-      note: "Recommended. Q4 was observed dropping a whole clause; the extra 110 ms buys not losing words.",
+      note: "Full precision. Slower, and large enough that it can fail to fit beside the speech model on an 8 GB card.",
       size: "1.41 GB",
     },
     {
@@ -79,9 +85,15 @@
 
   const MULTILINGUAL = [
     {
+      file: "gemma-4-E2B_q4_0-it.gguf",
+      label: "Gemma 4 E2B  QAT Q4_0",
+      note: "Recommended. Fewer errors than Gemma 3 4B on Polish at the same speed, and only about 1 GB of it sits in graphics memory; the rest stays in system RAM.",
+      size: "3.12 GB",
+    },
+    {
       file: "gemma-3-4b-it-qat-Q4_0.gguf",
       label: "Gemma 3 4B  QAT Q4_0",
-      note: "Recommended. Quantization-aware trained, so it recovers most of what plain Q4 loses.",
+      note: "The previous default. Slightly more errors on Polish and 1.8 GB of graphics memory.",
       size: "2.35 GB",
     },
     {

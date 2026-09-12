@@ -31,18 +31,21 @@ $files = @(
     # Silence gate, brief 6.1. v6.2.0 exists upstream; v5.1.2 is the revision whisper.cpp
     # documents against.
     @{ repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v5.1.2.bin'; note = 'Silero VAD, ~2 MB' }
-    # English cleanup, brief 4.2. F16 rather than Q4_K_M: Q4 was observed dropping a
-    # clause outright. Amendment A23.
-    @{ repo = 'superwhisper/s1-mini-GGUF'; file = 's1-mini-f16.gguf'; note = 'S1-mini F16, ~1.5 GB' }
+    # English cleanup, brief 4.2. Q8_0, our own conversion of Superwhisper's F16: identical
+    # output on 94-95% of dictations, no content loss, half the size. Q4_K_M was observed
+    # dropping a clause outright. Amendments A23 and A27.
+    @{ repo = 'stanthegorilla/S1-mini-Q8_0-GGUF'; file = 's1-mini-q8_0.gguf'; note = 'S1-mini Q8_0, ~0.8 GB' }
     # Brief 4.2 requires shipping these alongside the model.
     @{ repo = 'superwhisper/s1-mini-GGUF'; file = 'LICENSE'; note = 'S1-mini licence' }
     @{ repo = 'superwhisper/s1-mini-GGUF'; file = 'NOTICE'; note = 'S1-mini notice' }
 )
 
 if ($Multilingual) {
-    # ggml-org's mirror of the QAT weights, not Google's repository -- that one is gated
-    # and returns 401 without a token, which rules it out for on-demand download.
-    $files += @{ repo = 'ggml-org/gemma-3-4b-it-qat-GGUF'; file = 'gemma-3-4b-it-qat-Q4_0.gguf'; note = 'Gemma 3 4B QAT Q4_0, ~2.4 GB' }
+    # Gemma 4 E2B, Google's own QAT GGUF (this repository is not gated, unlike Gemma 3's).
+    # Measured on 100 Polish dictations against Gemma 3 4B: lower error rate, a quarter
+    # of the content losses, same speed, and 40% less graphics memory because its
+    # per-layer embeddings stay in system RAM. Amendment A28.
+    $files += @{ repo = 'google/gemma-4-E2B-it-qat-q4_0-gguf'; file = 'gemma-4-E2B_q4_0-it.gguf'; note = 'Gemma 4 E2B QAT Q4_0, ~3.3 GB' }
 }
 
 foreach ($f in $files) {
