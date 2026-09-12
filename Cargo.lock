@@ -2536,6 +2536,8 @@ dependencies = [
  "clap",
  "lathe-core",
  "llama-cpp-2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

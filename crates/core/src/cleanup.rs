@@ -86,7 +86,13 @@ pub struct Cleaned {
     pub text: String,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
+    /// Prompt processing plus generation. Excludes `setup_ms`.
     pub infer_ms: u128,
+    /// Creating the llama context: KV cache allocation and GPU priming, paid once
+    /// per dictation because the context is not reused.
+    pub setup_ms: u128,
+    /// The single batched decode of the whole prompt.
+    pub prompt_ms: u128,
 }
 
 /// Which prompt contract a loaded model speaks.
@@ -274,7 +280,9 @@ impl Cleanup {
             .with_n_threads(threads)
             .with_n_threads_batch(threads);
 
+        let setup = Instant::now();
         let mut ctx = self.model.new_context(backend, ctx_params)?;
+        let setup_ms = setup.elapsed().as_millis();
 
         let mut batch = LlamaBatch::new(n_ctx as usize, 1);
         let last = prompt_tokens - 1;
@@ -284,6 +292,9 @@ impl Cleanup {
 
         let start = Instant::now();
         ctx.decode(&mut batch)?;
+        // Vulkan returns from decode before the GPU is done; the first sample below is
+        // what actually waits for the logits, so prompt time is taken there.
+        let mut prompt_ms = 0;
 
         // Brief 4.2 item 4: normalization is deterministic.
         let mut sampler = LlamaSampler::greedy();
@@ -298,6 +309,9 @@ impl Cleanup {
 
         while generated < max_new {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            if generated == 0 {
+                prompt_ms = start.elapsed().as_millis();
+            }
             if self.model.is_eog_token(token) {
                 break;
             }
@@ -319,6 +333,8 @@ impl Cleanup {
             prompt_tokens,
             generated_tokens: generated,
             infer_ms,
+            setup_ms,
+            prompt_ms,
         })
     }
 }

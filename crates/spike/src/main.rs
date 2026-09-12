@@ -35,6 +35,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "s1-mini-q4_k_m.gguf")]
     cleanup_model: String,
 
+    /// Override the non-English cleanup model filename, for comparing candidates.
+    #[arg(long, global = true, default_value = "gemma-3-4b-it-qat-Q4_0.gguf")]
+    multilingual_model: String,
+
     /// Let whisper.cpp and llama.cpp log to stderr. Off by default: llama.cpp emits
     /// several hundred lines per model load.
     #[arg(long, global = true)]
@@ -130,6 +134,32 @@ enum Command {
         #[arg(long)]
         vocabulary: bool,
     },
+    /// Run the cleanup model over a set of transcripts and, given an earlier run's
+    /// output, score how closely this model reproduces it.
+    ///
+    /// The reference is the full-precision model's output: decoding is greedy, so a
+    /// quantization either reproduces F16 word for word or it does not, and "does not"
+    /// is reported as exact-match rate, word error rate against F16, and the number of
+    /// outputs that lost content -- the clause-dropping failure amendment A23 caught by
+    /// eye, detected mechanically here.
+    CleanupEval {
+        /// JSON lines of {raw, styling, structure, context}.
+        #[arg(long, default_value = "assets/cleanup-eval.jsonl")]
+        set: PathBuf,
+        /// Where this model's outputs go, one JSON line per input, in order.
+        #[arg(long)]
+        out: PathBuf,
+        /// A previous --out file to score against, normally the F16 run.
+        #[arg(long)]
+        reference: Option<PathBuf>,
+        /// Score against the set's own `clean` field instead of another run. For
+        /// comparing different models, where no one of them is the reference.
+        #[arg(long)]
+        against_clean: bool,
+        /// Language code. Anything but "en" uses the instruction-model prompt.
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
     /// Duck other applications for a few seconds, then restore. Verifies the ducking
     /// path without needing a dictation.
     Duck {
@@ -210,7 +240,6 @@ impl From<ContextArg> for Context {
 }
 
 const VAD_MODEL: &str = "ggml-silero-v5.1.2.bin";
-const MULTILINGUAL_MODEL: &str = "gemma-3-4b-it-qat-Q4_0.gguf";
 
 fn threads() -> i32 {
     std::thread::available_parallelism()
@@ -286,6 +315,7 @@ fn main() -> Result<()> {
                 &backend,
                 &cli.models,
                 &cli.cleanup_model,
+                &cli.multilingual_model,
                 cli.gpu,
                 &lang,
                 &text,
@@ -393,6 +423,25 @@ fn main() -> Result<()> {
             )?;
         }
 
+        Command::CleanupEval {
+            set,
+            out,
+            reference,
+            against_clean,
+            lang,
+        } => {
+            cleanup_eval(
+                &cli.models,
+                &cli.cleanup_model,
+                cli.gpu,
+                &set,
+                &out,
+                reference.as_deref(),
+                against_clean,
+                &lang,
+            )?;
+        }
+
         Command::Duck { secs, level } => {
             let ducker = lathe_core::ducking::Ducker::start(level)?;
             println!(
@@ -446,6 +495,7 @@ fn main() -> Result<()> {
                 &backend,
                 &cli.models,
                 &cli.cleanup_model,
+                &cli.multilingual_model,
                 cli.gpu,
                 &lang,
                 &transcript.text,
@@ -546,6 +596,7 @@ fn run_cleanup(
     backend: &LlamaBackend,
     models: &Path,
     cleanup_model: &str,
+    multilingual_model: &str,
     gpu: i32,
     lang: &str,
     raw: &str,
@@ -557,7 +608,7 @@ fn run_cleanup(
     let (model, flavour) = if lang.eq_ignore_ascii_case("en") {
         (cleanup_model, cleanup::Flavour::S1Mini)
     } else {
-        (MULTILINGUAL_MODEL, cleanup::Flavour::Instruct)
+        (multilingual_model, cleanup::Flavour::Instruct)
     };
     let (engine, load_ms) =
         cleanup::Cleanup::load(backend, &models.join(model), gpu, 999, flavour)?;
@@ -577,6 +628,234 @@ fn run_cleanup(
         cleaned.infer_ms, cleaned.generated_tokens
     );
     Ok(cleaned)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EvalItem {
+    raw: String,
+    styling: Styling,
+    structure: Structure,
+    context: Context,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    /// What the output should be, when the set knows. Synthetic sets do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clean: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EvalOutput {
+    #[serde(flatten)]
+    item: EvalItem,
+    cleaned: String,
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    setup_ms: u128,
+    prompt_ms: u128,
+    infer_ms: u128,
+}
+
+fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("could not read {}: {e}", path.display()))?;
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            serde_json::from_str(l)
+                .map_err(|e| anyhow::anyhow!("{}:{}: {e}", path.display(), i + 1))
+        })
+        .collect()
+}
+
+fn cleanup_eval(
+    models: &Path,
+    cleanup_model: &str,
+    gpu: i32,
+    set: &Path,
+    out: &Path,
+    reference: Option<&Path>,
+    against_clean: bool,
+    lang: &str,
+) -> Result<()> {
+    let items: Vec<EvalItem> = read_jsonl(set)?;
+    let flavour = if lang.eq_ignore_ascii_case("en") {
+        cleanup::Flavour::S1Mini
+    } else {
+        cleanup::Flavour::Instruct
+    };
+    let language = lathe_core::engine::language_name(lang);
+    let backend = LlamaBackend::init()?;
+    let (engine, load_ms) = cleanup::Cleanup::load(
+        &backend,
+        &models.join(cleanup_model),
+        gpu,
+        999,
+        flavour,
+    )?;
+    eprintln!("{cleanup_model} loaded in {load_ms}ms, {} inputs", items.len());
+
+    // The first call pays for shader compilation; run it and discard so the timings
+    // below are warm. Same discipline as `bench`.
+    if let Some(first) = items.first() {
+        engine.normalize(
+            &backend,
+            &first.raw,
+            first.styling,
+            first.structure,
+            first.context,
+            threads(),
+            language,
+        )?;
+    }
+
+    let total = items.len();
+    let mut outputs = Vec::with_capacity(total);
+    for (i, item) in items.into_iter().enumerate() {
+        let cleaned = engine.normalize(
+            &backend,
+            &item.raw,
+            item.styling,
+            item.structure,
+            item.context,
+            threads(),
+            language,
+        )?;
+        eprint!("\r{}/{total}", i + 1);
+        outputs.push(EvalOutput {
+            item,
+            cleaned: cleaned.text,
+            prompt_tokens: cleaned.prompt_tokens,
+            generated_tokens: cleaned.generated_tokens,
+            setup_ms: cleaned.setup_ms,
+            prompt_ms: cleaned.prompt_ms,
+            infer_ms: cleaned.infer_ms,
+        });
+    }
+    eprintln!();
+
+    let mut lines = String::new();
+    for o in &outputs {
+        lines.push_str(&serde_json::to_string(o)?);
+        lines.push('\n');
+    }
+    std::fs::write(out, lines)?;
+
+    let n = total as f64;
+    let sum = |f: &dyn Fn(&EvalOutput) -> u128| outputs.iter().map(f).sum::<u128>() as f64;
+    let generated = sum(&|o| o.generated_tokens as u128);
+    let decode_ms = sum(&|o| o.infer_ms - o.prompt_ms);
+    println!("{cleanup_model}: {total} inputs");
+    println!(
+        "  per dictation: setup {:.1}ms, prompt {:.1}ms ({:.0} tokens), decode {:.1}ms ({:.2}ms/token, {:.0} tokens)",
+        sum(&|o| o.setup_ms) / n,
+        sum(&|o| o.prompt_ms) / n,
+        sum(&|o| o.prompt_tokens as u128) / n,
+        decode_ms / n,
+        decode_ms / generated,
+        generated / n,
+    );
+
+    // What to score against: another run's outputs, or the set's own clean text.
+    let (label, refs): (String, Vec<String>) = if against_clean {
+        let clean = outputs
+            .iter()
+            .map(|o| o.item.clean.clone())
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| anyhow::anyhow!("--against-clean needs a `clean` field on every input"))?;
+        ("clean text".to_string(), clean)
+    } else if let Some(reference) = reference {
+        let runs: Vec<EvalOutput> = read_jsonl(reference)?;
+        if runs.len() != total {
+            anyhow::bail!("reference has {} outputs, this run {total}", runs.len());
+        }
+        for (i, (r, h)) in runs.iter().zip(&outputs).enumerate() {
+            if r.item.raw != h.item.raw {
+                anyhow::bail!("input {} differs between the reference and this set", i + 1);
+            }
+        }
+        (reference.display().to_string(), runs.into_iter().map(|r| r.cleaned).collect())
+    } else {
+        return Ok(());
+    };
+
+    let mut exact = 0usize;
+    let mut errors = 0usize;
+    let mut ref_words = 0usize;
+    let mut lost = Vec::new();
+    let mut differing: Vec<(usize, usize)> = Vec::new();
+    for (i, (r, h)) in refs.iter().zip(&outputs).enumerate() {
+        let rw = words(r);
+        let hw = words(&h.cleaned);
+        let (dist, _) = compare(&rw, &hw);
+        ref_words += rw.len();
+        errors += dist;
+        if *r == h.cleaned {
+            exact += 1;
+        } else {
+            differing.push((dist, i));
+        }
+        if lost_content(&rw, &hw) {
+            lost.push(i);
+        }
+    }
+    println!(
+        "  vs {label}: exact {exact}/{total} ({:.1}%), WER {:.2}%, content lost in {}",
+        100.0 * exact as f64 / n,
+        100.0 * errors as f64 / ref_words.max(1) as f64,
+        lost.len(),
+    );
+    for &i in &lost {
+        println!("\n  content lost, input {}:", i + 1);
+        println!("    ref:  {}", refs[i]);
+        println!("    this: {}", outputs[i].cleaned);
+    }
+    differing.sort_unstable_by(|a, b| b.cmp(a));
+    for &(dist, i) in differing.iter().take(5) {
+        if lost.contains(&i) {
+            continue;
+        }
+        println!("\n  {dist} word edits, input {}:", i + 1);
+        println!("    ref:  {}", refs[i]);
+        println!("    this: {}", outputs[i].cleaned);
+    }
+    Ok(())
+}
+
+/// Words that carry no content on their own. Dropping one of these is a stylistic
+/// difference; dropping anything else is the failure the eval exists to catch.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "so", "to", "of", "in", "on", "at", "for",
+    "with", "by", "from", "as", "is", "are", "was", "were", "be", "been", "am", "it",
+    "its", "it's", "this", "that", "these", "those", "i", "i'm", "i'd", "i'll", "i've",
+    "you", "your", "we", "our", "they", "their", "he", "she", "me", "my", "us", "them",
+    "do", "does", "did", "have", "has", "had", "will", "would", "can", "could", "should",
+    "just", "really", "very", "also", "then", "there", "here", "if", "than", "about",
+    "up", "out", "please", "thanks", "thank", "okay", "ok", "yeah", "yes", "no", "not",
+    "um", "uh", "like", "mean", "well", "actually", "basically", "kind", "sort",
+    // Polish function words and fillers, for the multilingual sets.
+    "i", "w", "na", "z", "ze", "że", "się", "nie", "to", "jest", "są", "był", "była",
+    "no", "znaczy", "jakby", "okej", "yyy", "więc", "tak", "już", "ale", "o", "do", "po",
+    "od", "za", "co", "ten", "ta", "te", "ja", "ty", "my", "by", "czy", "jak", "tam", "tu",
+    "mi", "mnie", "ci", "cię", "go", "mu", "ją", "jej", "ich", "im", "nas", "wam", "was",
+    "dla", "przez", "przy", "pod", "nad", "bez", "też", "tylko", "bardzo", "może",
+];
+
+/// True when the hypothesis is the reference with content words removed and nothing
+/// added: every content word it has, the reference also has, and at least one of the
+/// reference's is gone. A reworded output is not a loss, and neither is one that
+/// collapses a word the reference repeated -- only a word that disappears entirely.
+fn lost_content(reference: &[String], hypothesis: &[String]) -> bool {
+    use std::collections::HashSet;
+    fn content(ws: &[String]) -> HashSet<&str> {
+        ws.iter()
+            .map(String::as_str)
+            .filter(|w| !STOPWORDS.contains(w))
+            .collect()
+    }
+    let r = content(reference);
+    let h = content(hypothesis);
+    h.is_subset(&r) && !r.is_subset(&h)
 }
 
 /// One line per sentence, `#` for comments.
@@ -798,4 +1077,27 @@ fn accuracy(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_clause_is_content_loss() {
+        // Amendment A23's Q4_K_M failure, verbatim.
+        let f16 = words("Can you send me the file when you get a chance? I mean the one from yesterday, not the older one. Thanks.");
+        let q4 = words("Can you send me the file from yesterday, not the older one? Thanks.");
+        assert!(lost_content(&f16, &q4));
+    }
+
+    #[test]
+    fn rewording_is_not_content_loss() {
+        let f16 = words("Please send the report by Friday.");
+        assert!(!lost_content(&f16, &words("Send the report by Friday, please.")));
+        assert!(!lost_content(&f16, &words("Please send the summary by Friday.")));
+        assert!(!lost_content(&f16, &f16));
+        let repeated = words("Send the report. Send the report by Friday.");
+        assert!(!lost_content(&repeated, &words("Send the report by Friday.")));
+    }
 }

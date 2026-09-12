@@ -15,6 +15,11 @@ node_modules
 /recordings
 /recordings-pl
 
+# Quantization work. The history-derived sets are the user's own dictations; the
+# rest is gigabytes of candidate weights and imatrix files. scripts/quant/ is the
+# reproducible part.
+/quant
+
 # ...except the fixed reference clip, which the benchmark measures against and which
 # worker.rs embeds with include_bytes!. Without it the build does not compile.
 !/assets/jfk.wav

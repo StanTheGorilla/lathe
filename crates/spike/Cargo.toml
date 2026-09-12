@@ -8,6 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 lathe-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Static, matching lathe-core: see the note there and amendment A14. Cargo unifies
 # features across the workspace, so "dynamic-link" here would silently make the app
 # binary dynamic too, and its ggml would collide with CrispASR's.
