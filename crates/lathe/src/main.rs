@@ -20,12 +20,13 @@ mod worker;
 
 use anyhow::Result;
 use lathe_core::config::Config;
+use lathe_core::engine::language_name;
 use lathe_core::hotkey::{self, Action, Binding, Bound};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -40,6 +41,8 @@ pub struct AppState {
     pub download_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Rendered dictate binding, shown in the tray tooltip.
     pub hotkey_label: String,
+    /// Rendered paste-raw binding, for rebuilding the tray menu.
+    pub paste_raw_label: String,
     /// The last binding the hook matched, for the hotkey tester in settings. This is
     /// only ever written for combinations Lathe is bound to -- it is not a log of keys.
     pub last_hotkey: Arc<Mutex<Option<(String, String)>>>,
@@ -227,7 +230,6 @@ fn run(args: &[String]) -> Result<()> {
 
     let tap_threshold = Duration::from_millis(config.tap_threshold_ms);
     let hotkey_mode = Arc::new(Mutex::new(config.hotkey_mode));
-    let preset_names: Vec<String> = config.presets.iter().map(|p| p.name.clone()).collect();
 
     let config = Arc::new(Mutex::new(config));
     let (worker_tx, worker_rx) = mpsc::channel::<worker::Msg>();
@@ -294,6 +296,7 @@ fn run(args: &[String]) -> Result<()> {
         download: Arc::new(Mutex::new(None)),
         download_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         hotkey_label: hotkey_label.clone(),
+        paste_raw_label: paste_raw_label.clone(),
         last_hotkey: Arc::clone(&last_hotkey),
     };
 
@@ -337,7 +340,7 @@ fn run(args: &[String]) -> Result<()> {
             commands::last_hotkey,
         ])
         .setup(move |app| {
-            build_tray(app.handle(), &preset_names, &hotkey_label, &paste_raw_label)?;
+            build_tray(app.handle(), &config.lock().unwrap(), &hotkey_label, &paste_raw_label)?;
 
             worker::spawn(worker::Context {
                 app: app.handle().clone(),
@@ -383,12 +386,15 @@ fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn build_tray(
+/// The tray menu: bindings as labels, one check item per preset with the active one
+/// ticked, then settings and quit. Rebuilt whenever the presets or the active one
+/// change, so it never shows a stale list.
+fn tray_menu(
     app: &AppHandle,
-    preset_names: &[String],
+    config: &Config,
     hotkey: &str,
     paste_raw: &str,
-) -> Result<()> {
+) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
 
     // Disabled, so it reads as a label rather than an action. The user has to be able
@@ -409,12 +415,90 @@ fn build_tray(
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
-    for name in preset_names {
-        menu.append(&MenuItem::with_id(app, format!("preset:{name}"), name, true, None::<&str>)?)?;
+    // Amendment A29: the language is its own switch, separate from the presets below.
+    // The current one is shown as a label; the one action offered is the other one.
+    let current = config.languages.current();
+    menu.append(&MenuItem::with_id(
+        app,
+        "language",
+        format!("Language: {}", language_name(current)),
+        false,
+        None::<&str>,
+    )?)?;
+    if let Some(other) = config.languages.other() {
+        menu.append(&MenuItem::with_id(
+            app,
+            format!("language:{other}"),
+            switch_label(other),
+            true,
+            None::<&str>,
+        )?)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+
+    for preset in &config.presets {
+        menu.append(&CheckMenuItem::with_id(
+            app,
+            format!("preset:{}", preset.name),
+            &preset.name,
+            true,
+            preset.name == config.active_preset,
+            None::<&str>,
+        )?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Quit Lathe", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+fn switch_label(other: &str) -> String {
+    format!("Switch to {}", language_name(other))
+}
+
+/// The tray's language switch. Written to config.toml, not just memory: the language
+/// someone dictates in is a fact about their day, not about this process, and it has
+/// to survive a restart. The file watcher then reloads it and rebuilds the menu.
+fn switch_language(app: &AppHandle, code: &str) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let text = {
+        let mut config = state.config.lock().unwrap();
+        config.languages.active = code.to_string();
+        config.to_toml()
+    };
+    match text.and_then(|t| std::fs::write(&state.config_path, t).map_err(Into::into)) {
+        Ok(()) => eprintln!("language: {}", language_name(code)),
+        Err(e) => eprintln!("could not save the language switch: {e:#}"),
+    }
+}
+
+/// Rebuilds the tray menu from the current config. Called after a preset is picked
+/// from the tray and after every config reload.
+pub fn refresh_tray(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Some(tray) = app.tray_by_id("lathe") else {
+        return;
+    };
+    let menu = {
+        let config = state.config.lock().unwrap();
+        tray_menu(app, &config, &state.hotkey_label, &state.paste_raw_label)
+    };
+    match menu {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                eprintln!("could not update the tray menu: {e}");
+            }
+        }
+        Err(e) => eprintln!("could not build the tray menu: {e}"),
+    }
+}
+
+fn build_tray(app: &AppHandle, config: &Config, hotkey: &str, paste_raw: &str) -> Result<()> {
+    let menu = tray_menu(app, config, hotkey, paste_raw)?;
 
     TrayIconBuilder::with_id("lathe")
         .icon(tray_image(tray::State::Idle))
@@ -427,11 +511,15 @@ fn build_tray(
                 app.exit(0);
             } else if id == "settings" {
                 open_settings(app);
+            } else if let Some(code) = id.strip_prefix("language:") {
+                switch_language(app, code);
+                refresh_tray(app);
             } else if let Some(name) = id.strip_prefix("preset:") {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.config.lock().unwrap().active_preset = name.to_string();
                     eprintln!("active preset: {name}");
                 }
+                refresh_tray(app);
             }
         })
         .build(app)?;
@@ -494,6 +582,7 @@ fn watch_config(
                     *current = reloaded;
                     drop(current);
                     eprintln!("config reloaded");
+                    refresh_tray(&app);
                     let _ = app.emit_to("settings", "config-reloaded", ());
                     if hotkey_changed {
                         notify_user("Lathe", "Hotkey change needs a restart to take effect.");
@@ -537,3 +626,14 @@ fn print_devices() -> Result<()> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::switch_label;
+
+    #[test]
+    fn the_switch_names_the_language_in_words() {
+        assert_eq!(switch_label("pl"), "Switch to Polish");
+        assert_eq!(switch_label("en"), "Switch to English");
+    }
+}

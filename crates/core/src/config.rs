@@ -32,6 +32,7 @@ pub struct Config {
     /// Brief 5.1: hard cap so a stuck key cannot fill RAM.
     pub max_record_secs: u64,
     pub active_preset: String,
+    pub languages: Languages,
     pub audio: Audio,
     pub models: Models,
     pub remote_asr: RemoteAsr,
@@ -40,6 +41,51 @@ pub struct Config {
     pub vocabulary: crate::vocabulary::Vocabulary,
     pub history: HistoryConfig,
     pub presets: Vec<Preset>,
+}
+
+/// The language being dictated. A preset says how the text should come out; this says
+/// what is being said. Two are configured -- the one usually spoken and one more -- and
+/// the tray switches between them, so changing language never means changing preset.
+/// Amendment A29.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Languages {
+    /// ISO 639-1 code, as the recogniser takes it.
+    pub main: String,
+    /// The other language the tray can switch to. Empty means no switch is offered.
+    pub secondary: String,
+    /// Which of the two is in use right now. Persisted, so it survives a restart.
+    pub active: String,
+}
+
+impl Default for Languages {
+    fn default() -> Self {
+        Self {
+            main: "en".into(),
+            secondary: "pl".into(),
+            active: "en".into(),
+        }
+    }
+}
+
+impl Languages {
+    /// The language to recognise and clean in. Falls back to the main one if the active
+    /// code is not one of the two, which a hand-edit can produce.
+    pub fn current(&self) -> &str {
+        if self.active == self.secondary && !self.secondary.is_empty() {
+            &self.secondary
+        } else {
+            &self.main
+        }
+    }
+
+    /// The language the tray offers to switch to, if there is one.
+    pub fn other(&self) -> Option<&str> {
+        if self.secondary.is_empty() || self.secondary == self.main {
+            return None;
+        }
+        Some(if self.current() == self.main { &self.secondary } else { &self.main })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,7 +205,6 @@ pub struct Preset {
     pub styling: Styling,
     pub structure: Structure,
     pub context: Context,
-    pub lang: String,
     /// False for the Raw preset, which bypasses S1-mini entirely per brief 5.3.
     #[serde(default = "yes")]
     pub cleanup: bool,
@@ -256,6 +301,7 @@ impl Default for Config {
             tap_threshold_ms: 400,
             max_record_secs: 300,
             active_preset: "Prompt".into(),
+            languages: Languages::default(),
             audio: Audio::default(),
             models: Models::default(),
             remote_asr: RemoteAsr::default(),
@@ -276,7 +322,6 @@ fn default_presets() -> Vec<Preset> {
             styling: Styling::SemiFormal,
             structure: Structure::Prose,
             context: Context::General,
-            lang: "en".into(),
             cleanup: true,
             auto_paste: true,
             vocabulary_sets: vec![],
@@ -288,7 +333,6 @@ fn default_presets() -> Vec<Preset> {
             styling: Styling::SemiCasual,
             structure: Structure::Prose,
             context: Context::General,
-            lang: "en".into(),
             cleanup: true,
             auto_paste: true,
             vocabulary_sets: vec![],
@@ -300,7 +344,6 @@ fn default_presets() -> Vec<Preset> {
             styling: Styling::SemiFormal,
             structure: Structure::Prose,
             context: Context::Email,
-            lang: "en".into(),
             cleanup: true,
             auto_paste: true,
             vocabulary_sets: vec![],
@@ -312,21 +355,6 @@ fn default_presets() -> Vec<Preset> {
             styling: Styling::SemiFormal,
             structure: Structure::Lists,
             context: Context::General,
-            lang: "en".into(),
-            cleanup: true,
-            auto_paste: true,
-            vocabulary_sets: vec![],
-            replacements: crate::vocabulary::default_replacements(),
-            hotkey: None,
-        },
-        // Requested during dogfooding: this user dictates in English and Polish. The
-        // preset exists so switching language is one tray click, not a settings edit.
-        Preset {
-            name: "Polski".into(),
-            styling: Styling::SemiFormal,
-            structure: Structure::Prose,
-            context: Context::General,
-            lang: "pl".into(),
             cleanup: true,
             auto_paste: true,
             vocabulary_sets: vec![],
@@ -338,7 +366,6 @@ fn default_presets() -> Vec<Preset> {
             styling: Styling::SemiFormal,
             structure: Structure::Prose,
             context: Context::General,
-            lang: "en".into(),
             cleanup: false,
             auto_paste: true,
             vocabulary_sets: vec![],
@@ -476,4 +503,25 @@ pub fn watch(path: PathBuf) -> std::sync::mpsc::Receiver<Result<Config, String>>
 
 pub fn history_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("history.db"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Languages;
+
+    #[test]
+    fn the_tray_offers_the_language_not_in_use() {
+        let mut l = Languages { main: "en".into(), secondary: "pl".into(), active: "en".into() };
+        assert_eq!(l.current(), "en");
+        assert_eq!(l.other(), Some("pl"));
+        l.active = "pl".into();
+        assert_eq!(l.current(), "pl");
+        assert_eq!(l.other(), Some("en"));
+        // A code that is neither falls back to the main language.
+        l.active = "xx".into();
+        assert_eq!(l.current(), "en");
+        // No secondary, no switch.
+        l.secondary.clear();
+        assert_eq!(l.other(), None);
+    }
 }

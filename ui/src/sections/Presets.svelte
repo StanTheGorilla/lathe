@@ -22,7 +22,8 @@
   };
 
   // The languages the speech model covers. English is cleaned by S1-mini; everything
-  // else uses the multilingual model.
+  // else uses the multilingual model. Amendment A29: language is chosen here and in the
+  // tray, not per preset.
   const LANGUAGES = [
     { code: "en", name: "English" },
     { code: "pl", name: "Polski (Polish)" },
@@ -48,6 +49,18 @@
     config.presets[index][field] = value;
     onchange();
   }
+
+  function setLanguage(field, value) {
+    config.languages[field] = value;
+    // The active one must be one of the two; follow the field that was edited if it was
+    // the active one, otherwise leave the switch where it is.
+    if (!["main", "secondary"].map((f) => config.languages[f]).includes(config.languages.active)) {
+      config.languages.active = config.languages.main;
+    }
+    onchange();
+  }
+
+  const langName = (code) => LANGUAGES.find((l) => l.code === code)?.name ?? code;
 
   // Rules round-trip through one line of text each. A real newline in a replacement is
   // shown as a literal \n, since the editor is line-based and a rule cannot span lines.
@@ -82,9 +95,46 @@
 
 <h1>Presets</h1>
 <p class="subtitle">
-  A preset bundles the three cleanup settings, the language, and whether cleanup runs at
-  all. Switch between presets from the tray menu.
+  A preset says how the text should come out: the three cleanup settings and whether
+  cleanup runs at all. The language you are speaking is separate, below. Both are switched
+  from the tray menu.
 </p>
+
+<h2>Language</h2>
+<div class="field">
+  <label for="lang-main">Main language</label>
+  <select
+    id="lang-main"
+    value={config.languages.main}
+    onchange={(e) => setLanguage("main", e.currentTarget.value)}
+  >
+    {#each LANGUAGES as l}
+      <option value={l.code}>{l.name}</option>
+    {/each}
+  </select>
+</div>
+<div class="field">
+  <label for="lang-secondary">Second language</label>
+  <select
+    id="lang-secondary"
+    value={config.languages.secondary}
+    onchange={(e) => setLanguage("secondary", e.currentTarget.value)}
+  >
+    <option value="">None</option>
+    {#each LANGUAGES as l}
+      <option value={l.code}>{l.name}</option>
+    {/each}
+  </select>
+  <p class="hint">
+    The tray menu shows the language in use and one item to switch to the other.
+    Currently dictating in {langName(config.languages.active || config.languages.main)}.
+    English is cleaned by S1-mini, built for exactly this job; anything else by the
+    multilingual model, a separate download under Models — without it the text is still
+    recognised but pasted uncleaned.
+  </p>
+</div>
+
+<h2>Preset</h2>
 
 <div class="preset-tabs">
   {#each config.presets as p, i}
@@ -184,28 +234,6 @@
     </span>
   </span>
 </label>
-
-<div class="field">
-  <label for="lang">Speech language</label>
-  <select
-    id="lang"
-    value={preset.lang}
-    onchange={(e) => set("lang", e.currentTarget.value)}
-  >
-    {#each LANGUAGES as l}
-      <option value={l.code}>{l.name}</option>
-    {/each}
-  </select>
-  <p class="hint">
-    {#if preset.lang === "en"}
-      English is cleaned by S1-mini, a model built for exactly this job.
-    {:else}
-      Cleaned by the multilingual model, which is a separate download under Models. Without
-      it, {LANGUAGES.find((l) => l.code === preset.lang)?.name ?? "this language"} is still
-      recognised but pasted uncleaned.
-    {/if}
-  </p>
-</div>
 
 <h2>Vocabulary</h2>
 

@@ -295,24 +295,26 @@ impl Engine {
         // decodes. Capped at 128 terms; biasing toward a list longer than the utterance
         // stops helping and starts dragging unrelated words toward it.
         let vocabulary = config.vocabulary.for_preset(&preset.vocabulary_sets);
+        // Amendment A29: the language is a global switch, not a property of the preset.
+        let lang = config.languages.current();
         asr.set_hotwords(&vocabulary.hotwords(128), config.vocabulary.hotword_boost);
 
         // Brief 4.3: the external endpoint, when configured, replaces local recognition.
         // The VAD gate above still runs locally, so silence is never uploaded.
         let (text, asr_ms) = if config.remote_asr.enabled {
             let started = Instant::now();
-            match remote_transcribe(config, &gated.pcm, &preset.lang) {
+            match remote_transcribe(config, &gated.pcm, lang) {
                 Ok(text) => (text, started.elapsed().as_millis()),
                 Err(e) if config.remote_asr.fallback_to_local => {
                     eprintln!("remote transcription failed, falling back to local: {e:#}");
-                    let t = asr.transcribe(&gated.pcm, &preset.lang)?;
+                    let t = asr.transcribe(&gated.pcm, lang)?;
                     (t.text, t.infer_ms)
                 }
                 // Brief section 10: fail loudly rather than silently downgrading.
                 Err(e) => return Err(e),
             }
         } else {
-            let t = asr.transcribe(&gated.pcm, &preset.lang)?;
+            let t = asr.transcribe(&gated.pcm, lang)?;
             (t.text, t.infer_ms)
         };
 
@@ -338,7 +340,7 @@ impl Engine {
         // still is; amendment A21 adds a second, multilingual model for everything else,
         // so a non-English preset is cleaned rather than passed through raw.
         let (cleaned, cleanup_ms) = if preset.cleanup {
-            let english = preset.lang.eq_ignore_ascii_case("en");
+            let english = lang.eq_ignore_ascii_case("en");
             let model = if english {
                 self.cleanup.as_ref()
             } else {
@@ -358,7 +360,7 @@ impl Engine {
                         preset.structure,
                         preset.context,
                         config.models.threads,
-                        language_name(&preset.lang),
+                        language_name(lang),
                     )?;
                     (result.text, result.infer_ms)
                 }
@@ -367,8 +369,7 @@ impl Engine {
                 // dictation rather than failing, since the raw transcript is still good.
                 None => {
                     eprintln!(
-                        "no cleanup model for '{}'; pasting the transcript uncleaned",
-                        preset.lang
+                        "no cleanup model for '{lang}'; pasting the transcript uncleaned"
                     );
                     (transcript.text.clone(), 0)
                 }
