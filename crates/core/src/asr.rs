@@ -268,6 +268,9 @@ pub struct Adapter {
     pub id: i32,
     pub name: String,
     pub vram_total: usize,
+    /// What this process could still allocate, from `VK_EXT_memory_budget`; other
+    /// processes' usage is already subtracted. Zero on drivers without the extension.
+    pub vram_free: usize,
     pub kind: AdapterKind,
 }
 
@@ -281,6 +284,7 @@ pub fn list_adapters() -> Vec<Adapter> {
             id: i as i32,
             name: d.description,
             vram_total: d.memory_total,
+            vram_free: d.memory_free,
             kind: match d.device_type {
                 T::Gpu => AdapterKind::Discrete,
                 T::IntegratedGpu => AdapterKind::Integrated,
@@ -289,6 +293,37 @@ pub fn list_adapters() -> Vec<Adapter> {
             },
         })
         .collect()
+}
+
+/// Free graphics memory on a device right now, in bytes. None when the device is gone
+/// or its driver cannot say.
+pub fn vram_free(device: i32) -> Option<usize> {
+    list_adapters()
+        .into_iter()
+        .find(|a| a.id == device && a.vram_free > 0)
+        .map(|a| a.vram_free)
+}
+
+/// The line to log when weights are about to be loaded into `free` bytes of graphics
+/// memory, and the warning to go with it when they will not fit.
+///
+/// The driver never refuses: a model that does not fit is placed in system memory and
+/// read across the bus on every token, which is 10-40x slower and stays that way for
+/// as long as the model is loaded. Nothing else reports it, so this does.
+pub fn vram_report(free: usize, needed: usize) -> (String, Option<String>) {
+    let mib = |b: usize| b / (1024 * 1024);
+    let line = format!(
+        "graphics memory: {} MiB free, {} MiB of weights to load",
+        mib(free),
+        mib(needed)
+    );
+    let warning = (needed > free).then(|| {
+        format!(
+            "weights do not fit in graphics memory ({} MiB short); dictation will be slow              until other applications release memory and the models are reloaded",
+            mib(needed - free)
+        )
+    });
+    (line, warning)
 }
 
 /// The device to use when the config asks for automatic selection.
@@ -358,8 +393,20 @@ mod tests {
             id,
             name: name.into(),
             vram_total: mib * 1024 * 1024,
+            vram_free: 0,
             kind,
         }
+    }
+
+    #[test]
+    fn warns_only_when_the_weights_do_not_fit() {
+        let mib = 1024 * 1024;
+        let (line, warning) = vram_report(3800 * mib, 3700 * mib);
+        assert_eq!(line, "graphics memory: 3800 MiB free, 3700 MiB of weights to load");
+        assert!(warning.is_none());
+
+        let (_, warning) = vram_report(1900 * mib, 3700 * mib);
+        assert!(warning.unwrap().starts_with("weights do not fit in graphics memory (1800 MiB short)"));
     }
 
     /// The common NVIDIA laptop: the integrated chip enumerates first, and picking

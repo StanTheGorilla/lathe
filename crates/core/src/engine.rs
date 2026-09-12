@@ -121,6 +121,19 @@ impl Engine {
             return Ok(());
         }
 
+        // One cleanup model resident at a time. Both together are 3.2 GB beside the
+        // speech model, and on an 8 GB card that other applications also use the second
+        // one lands in system memory and runs 20-40x slower -- Polish cleanup was taking
+        // 35-90 s. Switching language costs a 1-2 s reload instead.
+        if english && self.cleanup_multilingual.take().is_some() {
+            eprintln!("multilingual cleanup model unloaded: switching to English");
+        }
+        if !english && self.cleanup.take().is_some() {
+            eprintln!("s1-mini unloaded: switching to {language}");
+        }
+
+        self.report_vram(config, english);
+
         if self.asr.is_none() {
             progress("Loading speech model");
             let (asr, ms) = Asr::load(&config.whisper_path(), config.models.threads)?;
@@ -175,6 +188,40 @@ impl Engine {
         self.warmup(config, english)?;
         self.last_used = Instant::now();
         Ok(())
+    }
+
+    /// Log what is about to be loaded against what the card can still take, and warn
+    /// when it will not fit. Weights that spill into system memory make every
+    /// dictation 10-40x slower and nothing else says so. Measured before loading,
+    /// because afterwards the budget cannot tell spilled weights from resident ones.
+    fn report_vram(&mut self, config: &Config, english: bool) {
+        let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
+        if layers == 0 {
+            return;
+        }
+        let Some(free) = crate::asr::vram_free(device) else {
+            return;
+        };
+        let mut pending = Vec::new();
+        if self.asr.is_none() {
+            pending.push(config.whisper_path());
+        }
+        if english && self.cleanup.is_none() {
+            pending.push(config.cleanup_path());
+        }
+        if !english && self.cleanup_multilingual.is_none() {
+            pending.push(config.cleanup_multilingual_path());
+        }
+        let needed: u64 = pending
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let (line, warning) = crate::asr::vram_report(free, needed as usize);
+        eprintln!("{line}");
+        if let Some(warning) = warning {
+            eprintln!("warning: {warning}");
+        }
     }
 
     fn backend_mut(slot: &mut Option<LlamaBackend>) -> Result<&LlamaBackend> {

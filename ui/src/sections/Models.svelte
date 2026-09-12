@@ -207,7 +207,7 @@
 
 <h1>Models</h1>
 <p class="subtitle">
-  Loaded on the first dictation, not at startup, and freed again after the idle timeout.
+  Loaded on the first dictation, not at startup, and kept loaded from then on.
   Only the models the language you are speaking needs get loaded.
 </p>
 
@@ -395,6 +395,11 @@
   />
   <span>Keep models loaded permanently</span>
 </label>
+<p class="hint">
+  On by default. A model loaded while other applications hold the graphics memory lands in
+  system memory instead and stays slow until it is reloaded; keeping the models resident
+  means that happens once at most.
+</p>
 
 <h2>Benchmark</h2>
 <p class="hint" style="margin:-6px 0 10px">

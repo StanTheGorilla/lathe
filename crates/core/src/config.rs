@@ -78,6 +78,9 @@ pub struct Models {
     pub threads: i32,
     /// Brief 4.4: free VRAM after this long idle. Zero disables unloading.
     pub idle_unload_secs: u64,
+    /// On by default since the idle unload was found to be the cause of permanently
+    /// slow sessions: every reload is a fresh allocation, and one made while other
+    /// applications hold the card puts the weights in system memory for good.
     pub keep_loaded: bool,
 }
 
@@ -214,7 +217,7 @@ impl Default for Models {
                 .map(|n| n.get() as i32)
                 .unwrap_or(8),
             idle_unload_secs: 15 * 60,
-            keep_loaded: false,
+            keep_loaded: true,
         }
     }
 }
