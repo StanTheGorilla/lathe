@@ -30,8 +30,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          # The Linux artifact keeps its deb/ and appimage/ folders, hence the **.
           files: |
-            installers/*-setup.exe
-            installers/*.dmg
-            installers/*.deb
-            installers/*.AppImage
+            installers/**/*-setup.exe
+            installers/**/*.dmg
+            installers/**/*.deb
+            installers/**/*.AppImage
