@@ -8,9 +8,11 @@
 use anyhow::{Context as _, Result};
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
+    VK_V,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,15 @@ pub fn paste(
     if text.is_empty() {
         return Ok(());
     }
+    // The hotkey's modifiers are often still physically down when the text arrives: a
+    // latched recording stops on the *press* of Ctrl+Space, and a short sentence is
+    // typed well within the time it takes to lift the finger. Typed with Ctrl held,
+    // every character is a chord to the target app (Ctrl+, opened Windows Terminal's
+    // settings). Waiting is safer than injecting key-ups, which would desync the
+    // hotkey hook's own reads of the same state.
+    if !wait_until(modifiers_up, Duration::from_secs(2)) {
+        eprintln!("paste: a modifier key is still held after 2s, pasting anyway");
+    }
     match method {
         Method::SendInput => {
             type_unicode(text)?;
@@ -59,6 +70,25 @@ pub fn copy_only(text: &str) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("opening clipboard")?;
     clipboard.set_text(text).context("writing clipboard")?;
     Ok(())
+}
+
+fn modifiers_up() -> bool {
+    let down = |vk: VIRTUAL_KEY| unsafe { (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0 };
+    !(down(VK_CONTROL) || down(VK_MENU) || down(VK_SHIFT) || down(VK_LWIN))
+}
+
+/// Polls `ready` until it holds or `timeout` passes; true if it held.
+fn wait_until(ready: impl Fn() -> bool, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if ready() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Types the text as Unicode key events. No clipboard involvement at all.
@@ -157,4 +187,31 @@ fn send_ctrl_v() -> Result<()> {
         key_input(VK_CONTROL, KEYEVENTF_KEYUP),
     ];
     send(&inputs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn waits_for_the_condition_and_reports_it_held() {
+        let polls = Cell::new(0);
+        let held = wait_until(
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() >= 3
+            },
+            Duration::from_secs(1),
+        );
+        assert!(held);
+        assert_eq!(polls.get(), 3);
+    }
+
+    #[test]
+    fn gives_up_at_the_timeout() {
+        let start = Instant::now();
+        assert!(!wait_until(|| false, Duration::from_millis(50)));
+        assert!(start.elapsed() >= Duration::from_millis(50));
+    }
 }
