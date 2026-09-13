@@ -102,6 +102,9 @@ if [ "$bundle" = 1 ]; then
         exit 1
     fi
     need cargo-tauri 'install it with: cargo install tauri-cli --version "^2" --locked'
-    # Verbose, because a failing linuxdeploy is otherwise reported as one line.
+    # linuxdeploy resolves the executable's shared libraries through the loader's
+    # search path, and CrispASR's are nowhere on it until installed. Verbose, because
+    # a failing linuxdeploy is otherwise reported as one line.
+    export LD_LIBRARY_PATH="$profile_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     cargo tauri bundle --bundles "$bundles" --ci --verbose
 fi
