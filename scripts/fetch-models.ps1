@@ -34,7 +34,7 @@ $files = @(
     # English cleanup, brief 4.2. Q8_0, our own conversion of Superwhisper's F16: identical
     # output on 94-95% of dictations, no content loss, half the size. Q4_K_M was observed
     # dropping a clause outright. Amendments A23 and A27.
-    @{ repo = 'stanthegorilla/S1-mini-Q8_0-GGUF'; file = 's1-mini-q8_0.gguf'; note = 'S1-mini Q8_0, ~0.8 GB' }
+    @{ repo = 'stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF'; file = 's1-mini-q8_0.gguf'; note = 'S1-mini Q8_0, ~0.8 GB' }
     # Brief 4.2 requires shipping these alongside the model.
     @{ repo = 'superwhisper/s1-mini-GGUF'; file = 'LICENSE'; note = 'S1-mini licence' }
     @{ repo = 'superwhisper/s1-mini-GGUF'; file = 'NOTICE'; note = 'S1-mini notice' }

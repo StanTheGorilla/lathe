@@ -45,7 +45,7 @@ pub const KNOWN: &[Known] = &[
         file: "s1-mini-q8_0.gguf",
         label: "S1-mini Q8_0",
         role: "Cleanup, English",
-        url: "https://huggingface.co/stanthegorilla/S1-mini-Q8_0-GGUF/resolve/main/s1-mini-q8_0.gguf",
+        url: "https://huggingface.co/stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF/resolve/main/s1-mini-q8_0.gguf",
         approx_bytes: 805_000_000,
         required: true,
     },
@@ -88,6 +88,17 @@ pub const KNOWN: &[Known] = &[
         role: "Cleanup, alternative",
         url: "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-f16.gguf",
         approx_bytes: 1_515_000_000,
+        required: false,
+    },
+    // Our calibrated mixed build: Q6_K body, output head and fragile blocks at Q8_0,
+    // tolerant tensors at Q5_K. Identical to F16 on 86-92% of dictations, the rest
+    // punctuation; 21% smaller than Q8_0 and 10% faster.
+    Known {
+        file: "s1-mini-q6_k-mixed.gguf",
+        label: "S1-mini Q6_K mixed (smaller)",
+        role: "Cleanup, alternative",
+        url: "https://huggingface.co/stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF/resolve/main/s1-mini-q6_k-mixed.gguf",
+        approx_bytes: 636_000_000,
         required: false,
     },
     Known {

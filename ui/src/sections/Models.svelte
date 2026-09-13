@@ -70,6 +70,12 @@
       size: "0.75 GB",
     },
     {
+      file: "s1-mini-q6_k-mixed.gguf",
+      label: "S1-mini  Q6_K mixed",
+      note: "21% smaller and 10% faster than Q8_0. Matches F16 on 6 dictations in 7; the rest differ in punctuation, never in content.",
+      size: "0.59 GB",
+    },
+    {
       file: "s1-mini-f16.gguf",
       label: "S1-mini  F16",
       note: "Full precision. Slower, and large enough that it can fail to fit beside the speech model on an 8 GB card.",

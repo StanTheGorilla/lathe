@@ -57,6 +57,23 @@ Reproduce it yourself:
 Recordings are kept, so scoring a different model afterwards reuses the same audio
 rather than asking you to read everything again.
 
+## Models
+
+Speech is Cohere Transcribe (Q8_0), cleanup is S1-mini for English and Gemma 4 E2B for
+everything else, all fetched on first run. Superwhisper publishes S1-mini only at F16
+and Q4_K_M, and Q4_K_M was measured dropping whole clauses, so Lathe ships two builds
+of its own at
+[stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF](https://huggingface.co/stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF):
+
+| Build | Size | Output identical to F16 | Decode |
+|---|---|---|---|
+| Q8_0, the default | 805 MB | 94% / 95% (synthetic / real dictations) | 246 tok/s |
+| Q6_K mixed, calibrated on real dictations | 636 MB | 86% / 92%, the rest punctuation | 272 tok/s |
+| F16, upstream | 1,509 MB | reference | 150 tok/s |
+
+Neither dropped content on 202 test inputs. Fourteen builds were measured to get here;
+the harness is `lathe-spike cleanup-eval` and `scripts/quant/`.
+
 ## Hardware
 
 Today the GPU path is **Vulkan**, which covers AMD, Intel and NVIDIA on Windows through
