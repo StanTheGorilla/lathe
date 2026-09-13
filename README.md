@@ -116,7 +116,8 @@ to the executable. The reasoning is written out at the top of the script.
 Node.js; Linux additionally needs the Vulkan headers, `glslc`, `glslang-tools` and
 `spirv-headers` (ggml compiles its shaders at build time), plus the WebKitGTK,
 GTK 3, libayatana-appindicator and ALSA development packages that any Tauri app needs.
-`.github/workflows/build.yml` has the exact `apt` and `brew` lines.
+`.github/workflows/build.yml` has the exact `apt` and `brew` lines, and can be run by hand
+from the Actions tab for one platform at a time.
 
 ```sh
 ./scripts/build.sh              # release build

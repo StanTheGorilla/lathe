@@ -1,16 +1,21 @@
 name: Build
 
-# Every platform, on every push. Nothing here publishes; the bundles are attached as
-# workflow artifacts so a build can be tried on a machine that has never seen the
-# toolchain. release.yml calls this on a tag and attaches the same artifacts to a
-# release.
+# Nothing here publishes; the bundles are attached as workflow artifacts so a build can
+# be tried on a machine that has never seen the toolchain. release.yml calls this on a
+# tag and attaches the same artifacts to a release.
+#
+# Not on push: three platforms are close to an hour of runners, and a fix for one of
+# them should not rebuild the other two. Run it by hand and pick the platform.
 
 on:
-  push:
-    branches:
-      - "**"
   pull_request:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which to build: all, windows, macos or linux"
+        default: all
+        type: choice
+        options: [all, windows, macos, linux]
   workflow_call:
 
 env:
@@ -18,6 +23,7 @@ env:
 
 jobs:
   windows:
+    if: ${{ !inputs.platforms || inputs.platforms == 'all' || inputs.platforms == 'windows' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +73,7 @@ jobs:
           path: target/release/bundle/nsis/*-setup.exe
 
   macos:
+    if: ${{ !inputs.platforms || inputs.platforms == 'all' || inputs.platforms == 'macos' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +96,7 @@ jobs:
           path: target/release/bundle/dmg/*.dmg
 
   linux:
+    if: ${{ !inputs.platforms || inputs.platforms == 'all' || inputs.platforms == 'linux' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
