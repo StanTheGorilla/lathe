@@ -102,5 +102,6 @@ if [ "$bundle" = 1 ]; then
         exit 1
     fi
     need cargo-tauri 'install it with: cargo install tauri-cli --version "^2" --locked'
-    cargo tauri bundle --bundles "$bundles" --ci
+    # Verbose, because a failing linuxdeploy is otherwise reported as one line.
+    cargo tauri bundle --bundles "$bundles" --ci --verbose
 fi
