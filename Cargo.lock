@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "cohere-probe"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "lathe"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "lathe-core",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-core"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-spike"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
