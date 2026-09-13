@@ -60,6 +60,7 @@ const CLI_FLAGS: [&str; 4] = ["--devices", "--config-path", "--help", "-h"];
 /// interleaved with that terminal's own output, long after the launch. The tray run's
 /// stderr therefore goes nowhere; run one of the flags above from a shell to inspect the
 /// machine, or launch the binary with stderr redirected to capture a dictation.
+#[cfg(windows)]
 fn attach_console_for_cli(args: &[String]) {
     if !args.iter().any(|a| CLI_FLAGS.contains(&a.as_str())) {
         return;
@@ -77,6 +78,10 @@ fn attach_console_for_cli(args: &[String]) {
     }
 }
 
+/// Elsewhere a process launched from a terminal already has it.
+#[cfg(not(windows))]
+fn attach_console_for_cli(_args: &[String]) {}
+
 /// Rotated at this size. Big enough for a long session's worth of ggml chatter, small
 /// enough that a tray process running for months cannot fill a disk.
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -92,8 +97,6 @@ const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// Returns the path so the caller can say where it went. Failing to open it is not worth
 /// refusing to start over; the app simply keeps its silence.
 fn redirect_output_to_log() -> Option<std::path::PathBuf> {
-    use std::os::windows::io::AsRawHandle;
-
     let path = lathe_core::config::config_dir().ok()?.join("lathe.log");
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_MAX_BYTES {
         // One generation back is enough to survive a crash-and-restart.
@@ -106,12 +109,21 @@ fn redirect_output_to_log() -> Option<std::path::PathBuf> {
         .open(&path)
         .ok()?;
 
+    #[cfg(windows)]
     unsafe {
+        use std::os::windows::io::AsRawHandle;
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
         let handle = HANDLE(file.as_raw_handle());
         let _ = SetStdHandle(STD_ERROR_HANDLE, handle);
         let _ = SetStdHandle(STD_OUTPUT_HANDLE, handle);
+    }
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let _ = libc::dup2(fd, libc::STDERR_FILENO);
+        let _ = libc::dup2(fd, libc::STDOUT_FILENO);
     }
     // The standard handles now point at this file, so it has to outlive main.
     std::mem::forget(file);
@@ -131,14 +143,35 @@ pub fn log_path_for_display() -> String {
         .unwrap_or_else(|_| "the Lathe log".into())
 }
 
-/// Local wall-clock time, for the log header. Worth a line of Win32 rather than a date
-/// crate: this is the only place in the app that formats a time for a human.
+/// Local wall-clock time, for the log header. Worth a few lines of platform code
+/// rather than a date crate: this is the only place in the app that formats a time for
+/// a human.
+#[cfg(windows)]
 fn local_now() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
+}
+
+#[cfg(unix)]
+fn local_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut t: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut t) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.tm_year + 1900,
+        t.tm_mon + 1,
+        t.tm_mday,
+        t.tm_hour,
+        t.tm_min,
+        t.tm_sec
     )
 }
 
@@ -330,6 +363,7 @@ fn run(args: &[String]) -> Result<()> {
             commands::history_paste,
             commands::autostart_enabled,
             commands::set_autostart,
+            commands::platform,
             commands::downloadable_models,
             commands::download_progress,
             commands::cancel_download,
@@ -597,6 +631,7 @@ fn watch_config(
     });
 }
 
+#[cfg(windows)]
 pub fn notify_user(title: &str, body: &str) {
     let _ = tauri_winrt_notification::Toast::new(
         tauri_winrt_notification::Toast::POWERSHELL_APP_ID,
@@ -604,6 +639,34 @@ pub fn notify_user(title: &str, body: &str) {
     .title(title)
     .text1(body)
     .show();
+}
+
+/// `osascript` rather than the notification framework: that one refuses to post from
+/// anything but a signed, bundled app, and this has to work from a bare binary too.
+#[cfg(target_os = "macos")]
+pub fn notify_user(title: &str, body: &str) {
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(body),
+        applescript_escape(title)
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `notify-send` ships with every desktop that has a notification daemon, and a
+/// desktop without one has nowhere to show this anyway.
+#[cfg(target_os = "linux")]
+pub fn notify_user(title: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["--app-name=Lathe", title, body])
+        .status();
 }
 
 /// Brief 4.1 and 5.7: the adapter picker and the device dropdowns need names.

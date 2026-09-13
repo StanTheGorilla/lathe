@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { autostartEnabled, setAutostart, lastHotkey } from "../api.js";
+  import { autostartEnabled, setAutostart, lastHotkey, platform } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
@@ -8,8 +8,16 @@
   let autostartError = $state("");
   let seen = $state(null);
   let seenTimer = null;
+  // Which platform this is on decides the name of the Win/Cmd/Super key and the
+  // advice below the binding.
+  let os = $state({ os: "windows", super_key: "Win" });
 
   onMount(async () => {
+    try {
+      os = await platform();
+    } catch {
+      /* the Windows defaults above stand */
+    }
     try {
       autostart = await autostartEnabled();
     } catch (e) {
@@ -48,7 +56,7 @@
     if (e.ctrlKey) parts.push("Ctrl");
     if (e.altKey) parts.push("Alt");
     if (e.shiftKey) parts.push("Shift");
-    if (e.metaKey) parts.push("Win");
+    if (e.metaKey) parts.push(os.super_key);
 
     let key = e.key;
     if (key === " ") key = "Space";
@@ -113,7 +121,14 @@
     {capturing === "hotkey" ? "Press a combination" : config.hotkey}
   </button>
   <p class="hint">
-    Avoid Ctrl+Space: it is the Windows IME toggle and the completion key in most editors.
+    {#if os.os === "macos"}
+      Avoid Ctrl+Space and Cmd+Space: they switch the input source and open Spotlight.
+    {:else if os.os === "linux"}
+      Pick a combination nothing else uses. On Linux the key also reaches the focused
+      application, so Ctrl+Space would open completions in an editor every time.
+    {:else}
+      Avoid Ctrl+Space: it is the Windows IME toggle and the completion key in most editors.
+    {/if}
   </p>
 </div>
 

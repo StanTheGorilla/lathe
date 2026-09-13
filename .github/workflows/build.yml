@@ -1,0 +1,121 @@
+name: Build
+
+# Every platform, on every push. Nothing here publishes; the bundles are attached as
+# workflow artifacts so a build can be tried on a machine that has never seen the
+# toolchain. release.yml calls this on a tag and attaches the same artifacts to a
+# release.
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  VULKAN_VERSION: 1.4.357.0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}
+      - name: Install the Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkan_sdk.exe?Human=true"
+          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
+          $run = Start-Process .\vulkan_sdk.exe -Wait -PassThru -ArgumentList `
+            "--accept-licenses","--default-answer","--confirm-command","install"
+          if ($run.ExitCode -ne 0) { throw "the Vulkan SDK installer exited with $($run.ExitCode)" }
+          Remove-Item vulkan_sdk.exe
+      - name: Point the build at the Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          # The headers and the import library are what CMake's FindVulkan looks for. An
+          # installer that lays down only the loader and bin/ still sets VULKAN_SDK, and
+          # then fails 25 minutes later inside ggml-vulkan instead of here.
+          foreach ($needed in "$sdk\Include\vulkan\vulkan.h", "$sdk\Lib\vulkan-1.lib") {
+            if (-not (Test-Path $needed)) { throw "the Vulkan SDK at $sdk is incomplete: $needed is missing" }
+          }
+          "VULKAN_SDK=$sdk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: .\scripts\build.ps1 -Bundle
+      - run: cargo test --workspace --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lathe-windows
+          path: target/release/bundle/nsis/*-setup.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install cmake ninja
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: ./scripts/build.sh --bundle
+      - run: cargo test --workspace --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lathe-macos
+          path: target/release/bundle/dmg/*.dmg
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          # Tauri's webview and tray, cpal's ALSA, the Vulkan headers and shader
+          # compiler for ggml, and the Wayland client library for the clipboard.
+          sudo apt-get install -y \
+            cmake ninja-build \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libasound2-dev libvulkan-dev glslc libwayland-dev patchelf
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: ./scripts/build.sh --bundle
+      - run: cargo test --workspace --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lathe-linux
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage

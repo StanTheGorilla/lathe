@@ -21,6 +21,7 @@ pub fn config_path() -> Result<PathBuf> {
 pub struct Config {
     /// Amendment A6, reversed by A20: back to Ctrl+Space by request, because
     /// Ctrl+Alt+Space was already taken by another application on this machine.
+    /// The other platforms default differently; see `DEFAULT_HOTKEY`.
     pub hotkey: String,
     /// Brief 5.6: re-paste the last transcript pre-cleanup.
     pub paste_raw_hotkey: String,
@@ -292,11 +293,22 @@ impl Default for Output {
     }
 }
 
+/// The dictate and paste-raw bindings a fresh install gets. Amendment A30: each
+/// platform gets the chord that is free there, since Ctrl+Space is the input-source
+/// switch on macOS, and on Linux the hotkey is not swallowed, so a chord an editor
+/// also uses would fire in the editor on every dictation.
+#[cfg(windows)]
+pub const DEFAULT_HOTKEY: (&str, &str) = ("Ctrl+Space", "Ctrl+Shift+Space");
+#[cfg(target_os = "macos")]
+pub const DEFAULT_HOTKEY: (&str, &str) = ("Alt+Space", "Alt+Shift+Space");
+#[cfg(target_os = "linux")]
+pub const DEFAULT_HOTKEY: (&str, &str) = ("Ctrl+Alt+Space", "Ctrl+Alt+Shift+Space");
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hotkey: "Ctrl+Space".into(),
-            paste_raw_hotkey: "Ctrl+Shift+Space".into(),
+            hotkey: DEFAULT_HOTKEY.0.into(),
+            paste_raw_hotkey: DEFAULT_HOTKEY.1.into(),
             hotkey_mode: crate::hotkey::Mode::Auto,
             tap_threshold_ms: 400,
             max_record_secs: 300,

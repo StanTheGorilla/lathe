@@ -1,26 +1,31 @@
-// Global hotkey via a low-level keyboard hook, per amendment A1.
+// Global hotkey, per amendment A1 and amendment A30.
 //
-// `RegisterHotKey` cannot implement brief 5.1's auto-detect press style, because
-// WM_HOTKEY only fires on key-down: there is no key-up message, so press duration is
-// unmeasurable. WH_KEYBOARD_LL sees both edges.
-//
-// The hook callback belongs to Windows, not to us. It must do nothing but classify the
-// event and hand it off: Windows silently unhooks a callback that exceeds
-// LowLevelHooksTimeout (300ms by default), and a dropped hook fails silently.
+// `RegisterHotKey` and its equivalents cannot implement brief 5.1's auto-detect press
+// style, because they only report key-down: there is no key-up message, so press
+// duration is unmeasurable. Each platform therefore watches the keyboard itself --
+// a low-level hook on Windows, an event tap on macOS, the input devices on Linux --
+// and reports both edges here. The state machine that turns edges into events is
+// shared; only the listening differs.
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows as platform;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use self::macos as platform;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use self::linux as platform;
+#[cfg(target_os = "linux")]
+pub(crate) use self::linux::modifiers_up as linux_modifiers_up;
 
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
-    KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
-};
 
 /// How the dictate binding behaves.
 ///
@@ -85,9 +90,9 @@ impl Binding {
             let part = part.trim();
             match part.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" => binding.ctrl = true,
-                "alt" => binding.alt = true,
+                "alt" | "option" | "opt" => binding.alt = true,
                 "shift" => binding.shift = true,
-                "win" | "super" | "meta" => binding.win = true,
+                "win" | "super" | "meta" | "cmd" | "command" => binding.win = true,
                 "" => continue,
                 other => {
                     if binding.key != 0 {
@@ -105,6 +110,8 @@ impl Binding {
     }
 }
 
+/// Keys are held as Windows virtual-key codes on every platform, because that is what
+/// the config strings have always parsed to; the other platforms translate at the edge.
 fn key_code(name: &str) -> Option<u16> {
     Some(match name {
         "space" => 0x20,
@@ -145,60 +152,18 @@ fn key_code(name: &str) -> Option<u16> {
     })
 }
 
-/// What the hook thread sends to the state machine: which binding matched, and whether
-/// this was the press or the release.
-struct RawKey {
-    /// Index into `BINDINGS`.
+/// What the platform listener sends to the state machine: which binding matched, and
+/// whether this was the press or the release.
+pub(crate) struct RawKey {
+    /// Index into the bindings.
     which: usize,
     down: bool,
 }
 
-static HOOK_TX: OnceLock<Sender<RawKey>> = OnceLock::new();
-static BINDINGS: OnceLock<Vec<Bound>> = OnceLock::new();
-
-fn modifiers_held(binding: &Binding) -> bool {
-    // Read the modifier state at event time rather than tracking it ourselves, so the
-    // hook cannot drift out of sync after a focus change or a missed key-up.
-    let down = |vk: VIRTUAL_KEY| unsafe { (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0 };
-    down(VK_CONTROL) == binding.ctrl
-        && down(VK_MENU) == binding.alt
-        && down(VK_SHIFT) == binding.shift
-        && down(VK_LWIN) == binding.win
-}
-
-unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        let vk = info.vkCode as u16;
-        let msg = wparam.0 as u32;
-        let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-
-        if let Some(bindings) = BINDINGS.get() {
-            // First match wins. More specific combinations are sorted ahead of less
-            // specific ones at registration, so Ctrl+Shift+Space is tested before
-            // Ctrl+Space and the two do not shadow each other.
-            if down || up {
-                if let Some(which) = bindings
-                    .iter()
-                    .position(|b| vk == b.binding.key && modifiers_held(&b.binding))
-                {
-                    if let Some(tx) = HOOK_TX.get() {
-                        let _ = tx.send(RawKey { which, down });
-                    }
-                    // Swallow it so it never reaches the focused application.
-                    return LRESULT(1);
-                }
-            }
-        }
-    }
-    CallNextHookEx(None, code, wparam, lparam)
-}
-
-/// Installs the hook and runs the message loop. Never returns.
+/// Starts listening and never returns.
 ///
-/// A WH_KEYBOARD_LL hook only delivers events to a thread that pumps messages, so this
-/// owns a thread for the lifetime of the process.
+/// Every platform's listener wants a thread of its own for the lifetime of the process
+/// -- a message pump on Windows, a run loop on macOS, blocking reads on Linux.
 pub fn run(
     mut bindings: Vec<Bound>,
     mode: Arc<Mutex<Mode>>,
@@ -206,7 +171,7 @@ pub fn run(
     events: Sender<Event>,
 ) {
     // Most modifiers first. Without this, a binding of Ctrl+Space registered before
-    // Ctrl+Shift+Space would swallow the latter, since the hook takes the first match.
+    // Ctrl+Shift+Space would swallow the latter, since the listener takes the first match.
     bindings.sort_by_key(|b| {
         let m = &b.binding;
         std::cmp::Reverse(
@@ -215,26 +180,13 @@ pub fn run(
     });
 
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<RawKey>();
-    let _ = HOOK_TX.set(raw_tx);
-    let _ = BINDINGS.set(bindings.clone());
 
+    let for_state_machine = bindings.clone();
     std::thread::spawn(move || {
-        state_machine(bindings, mode, tap_threshold, raw_rx, events);
+        state_machine(for_state_machine, mode, tap_threshold, raw_rx, events);
     });
 
-    unsafe {
-        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0);
-        if hook.is_err() {
-            eprintln!("failed to install the keyboard hook: {:?}", hook.err());
-            return;
-        }
-
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
+    platform::listen(bindings, raw_tx);
 }
 
 /// One binding, three possible behaviours; see `Mode`.
@@ -339,6 +291,11 @@ fn state_machine(
     }
 }
 
+/// What this platform calls the Windows/Command/Super key when writing a binding out.
+pub fn super_label() -> &'static str {
+    platform::SUPER_LABEL
+}
+
 /// Renders a binding the way the user wrote it, for log lines.
 pub fn describe(b: &Binding) -> String {
     let mut parts = Vec::new();
@@ -352,7 +309,7 @@ pub fn describe(b: &Binding) -> String {
         parts.push("Shift".to_string());
     }
     if b.win {
-        parts.push("Win".to_string());
+        parts.push(platform::SUPER_LABEL.to_string());
     }
     parts.push(match b.key {
         0x20 => "Space".to_string(),

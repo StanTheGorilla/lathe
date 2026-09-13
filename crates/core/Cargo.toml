@@ -11,12 +11,6 @@ cpal = "0.18.2"
 dirs = "6"
 encoding_rs = "0.8.35"
 hound = "3.5.1"
-# Static, not dynamic-link. CrispASR always emits ggml-base.dll, ggml-cpu.dll,
-# ggml-vulkan.dll and ggml.dll; llama.cpp's dynamic build produces files with exactly
-# those names. Linking llama statically keeps its ggml inside the executable, so the two
-# runtimes are separate modules that can never resolve to each other. See amendment A14.
-llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
-crispasr = { git = "https://github.com/CrispStrobe/CrispASR", tag = "v0.8.31", features = ["vulkan"] }
 notify = "8"
 regex = "1"
 rphonetic = "4"
@@ -30,7 +24,35 @@ toml = "1"
 # reqwest because it needs no async runtime; roughly 1MB in the binary.
 ureq = { version = "3", features = ["json"] }
 
-[dependencies.windows]
+# The GPU backend is chosen per platform: Vulkan everywhere it exists, Metal on macOS.
+# Every crate in the workspace must agree, because cargo unifies features per target
+# and a stray "vulkan" on macOS would try to build both.
+#
+# Static, not dynamic-link. CrispASR always emits ggml-base.dll, ggml-cpu.dll,
+# ggml-vulkan.dll and ggml.dll; llama.cpp's dynamic build produces files with exactly
+# those names. Linking llama statically keeps its ggml inside the executable, so the two
+# runtimes are separate modules that can never resolve to each other. See amendment A14.
+# The same holds for .so and .dylib names on the other platforms.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
+crispasr = { git = "https://github.com/CrispStrobe/CrispASR", tag = "v0.8.31", features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "=0.1.155", features = ["metal"] }
+crispasr = { git = "https://github.com/CrispStrobe/CrispASR", tag = "v0.8.31", features = ["metal"] }
+# The keyboard event tap and the keystroke events, amendment A30.
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+core-graphics = "0.24"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Keyboards under /dev/input and the uinput virtual keyboard, amendment A30.
+evdev = "0.13"
+# Without this the Wayland clipboard is reached through XWayland, which not every
+# compositor bridges.
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
     "Win32_Foundation",

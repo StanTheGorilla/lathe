@@ -292,6 +292,26 @@ pub fn set_autostart(enabled: bool) -> Reply<()> {
     lathe_core::autostart::set_enabled(enabled).map_err(fail)
 }
 
+/// Amendment A30: what the settings window has to know about the platform it is on.
+#[derive(Serialize)]
+pub struct Platform {
+    /// "windows", "macos" or "linux".
+    os: &'static str,
+    /// The name of the Windows/Command/Super key as this platform writes it.
+    super_key: &'static str,
+    /// Whether other applications can be quietened while recording.
+    ducking: bool,
+}
+
+#[tauri::command]
+pub fn platform() -> Reply<Platform> {
+    Ok(Platform {
+        os: std::env::consts::OS,
+        super_key: lathe_core::hotkey::super_label(),
+        ducking: lathe_core::ducking::available(),
+    })
+}
+
 /// Brief 5.7: the model manager. What can be fetched, and what is already here.
 #[derive(Serialize)]
 pub struct Downloadable {

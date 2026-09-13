@@ -1,10 +1,12 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { listDevices, inputLevel, startLevelMeter, stopLevelMeter } from "../api.js";
+  import { listDevices, inputLevel, startLevelMeter, stopLevelMeter, platform } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
   let devices = $state({ inputs: [], outputs: [] });
+  // macOS has no per-application volume, so the ducking control is hidden there.
+  let ducking = $state(true);
   let level = $state({ peak_db: -120, rms_db: -120 });
   let metering = $state(false);
   let timer = null;
@@ -14,6 +16,11 @@
       devices = await listDevices();
     } catch (e) {
       devices = { inputs: [], outputs: [], error: String(e) };
+    }
+    try {
+      ducking = (await platform()).ducking;
+    } catch {
+      /* assume it works */
     }
   });
 
@@ -132,6 +139,12 @@
 
 <h2>While recording</h2>
 
+{#if !ducking}
+  <p class="hint">
+    Quietening other applications is not available on macOS: the system offers no way
+    to change another application's volume.
+  </p>
+{:else}
 <label class="check">
   <input
     type="checkbox"
@@ -165,6 +178,7 @@
       louder. Restored the moment recording stops.
     </p>
   </div>
+{/if}
 {/if}
 
 <h2>Speech detection</h2>

@@ -76,16 +76,20 @@ the harness is `lathe-spike cleanup-eval` and `scripts/quant/`.
 
 ## Hardware
 
-Today the GPU path is **Vulkan**, which covers AMD, Intel and NVIDIA on Windows through
-one backend. It was chosen so a single build runs on any reasonably modern GPU without
-per-vendor packaging.
+Today the GPU path is **Vulkan** on Windows and Linux, which covers AMD, Intel and
+NVIDIA through one backend, and **Metal** on macOS. Vulkan was chosen so a single build
+runs on any reasonably modern GPU without per-vendor packaging.
 
 Broader backend coverage — CUDA and DirectML in particular, and a build that picks the
 best available at runtime — is the largest open piece of work.
 
 ## Building
 
-Windows only, and the build has real prerequisites:
+Windows is the platform this is written and used on. macOS and Linux builds exist and compile
+in CI, but nobody has dictated with them yet; see
+[Other platforms](#other-platforms) below.
+
+The Windows build has real prerequisites:
 
 - Rust (stable, MSVC toolchain)
 - Visual Studio Build Tools with the Windows SDK
@@ -105,6 +109,35 @@ cd lathe
 `scripts/build.ps1` exists because neither step is a plain `cargo build`: it imports the
 MSVC environment, forces the Ninja generator, and copies the CrispASR runtime DLLs next
 to the executable. The reasoning is written out at the top of the script.
+
+### Other platforms
+
+`scripts/build.sh` is the macOS and Linux counterpart. It needs Rust, CMake, Ninja and
+Node.js; Linux additionally needs the Vulkan headers and `glslc`, plus the WebKitGTK,
+GTK 3, libayatana-appindicator and ALSA development packages that any Tauri app needs.
+`.github/workflows/build.yml` has the exact `apt` and `brew` lines.
+
+```sh
+./scripts/build.sh              # release build
+./scripts/build.sh --bundle     # ...and a .dmg, or a .deb and an AppImage
+```
+
+What differs from Windows, all of it by necessity rather than choice:
+
+- **macOS** needs the Accessibility permission (System Settings > Privacy & Security)
+  to hear the hotkey and to type; it asks on first launch. The default binding is
+  **Option+Space**. Other applications cannot be quietened while recording, because
+  macOS has no per-application volume.
+- **Linux** reads the keyboard through `/dev/input`, so the user must be in the `input`
+  group, and pastes through a `uinput` virtual keyboard, which needs a udev rule:
+  `KERNEL=="uinput", GROUP="input", MODE="0660"` in
+  `/etc/udev/rules.d/70-lathe.rules`. This works under X11 and Wayland alike, but the
+  hotkey is not swallowed -- the focused application sees it too -- so the default is
+  **Ctrl+Alt+Space** and anything an editor already uses is a poor choice. All text
+  goes through the clipboard; there is no typed path. Ducking uses `pactl`, which
+  works with PulseAudio and PipeWire.
+- The models download from the Models tab on every platform; `fetch-models.ps1` is
+  Windows-only.
 
 ## Configuration
 

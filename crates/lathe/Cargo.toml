@@ -10,15 +10,27 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow.workspace = true
 lathe-core = { path = "../core" }
-llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon", "custom-protocol"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
+
+# The GPU backend, per platform; the note in crates/core/Cargo.toml applies here too.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "=0.1.155", features = ["metal"] }
+
+[target.'cfg(unix)'.dependencies]
+# Redirecting the standard streams to the log file, and the local time in its header.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
     "Win32_Foundation",

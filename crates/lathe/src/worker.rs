@@ -174,7 +174,11 @@ fn run(ctx: Context) {
                 }
                 None => ui.nothing_to_do(
                     "Nothing to paste yet",
-                    "Ctrl+Shift+Space re-pastes your last dictation, and there has not \n                     been one yet. Ctrl+Alt+Space starts dictating.",
+                    &format!(
+                        "{} re-pastes your last dictation, and there has not been one \
+                         yet. {} starts dictating.",
+                        config.paste_raw_hotkey, config.hotkey
+                    ),
                 ),
             },
             Msg::Benchmark(reply) => {
@@ -249,7 +253,7 @@ fn dictate(
     // Quieten music and video for as long as this binding lives. Dropped at the end of
     // the function, which restores every volume even if a stage below fails or panics.
     // Started after the recorder so the cue is not itself ducked on the way out.
-    let ducker = if config.audio.duck_others {
+    let ducker = if config.audio.duck_others && lathe_core::ducking::available() {
         match lathe_core::ducking::Ducker::start(config.audio.duck_level) {
             Ok(d) => {
                 if d.count() > 0 {
@@ -412,7 +416,11 @@ fn dictate(
                 // speech normalises to nothing.
                 ui.nothing_to_do(
                     "Nothing left after cleanup",
-                    "What you said normalised to an empty string, so nothing was pasted. \n                     Ctrl+Shift+Space pastes it uncleaned.",
+                    &format!(
+                        "What you said normalised to an empty string, so nothing was \
+                         pasted. {} pastes it uncleaned.",
+                        config.paste_raw_hotkey
+                    ),
                 );
                 return;
             }

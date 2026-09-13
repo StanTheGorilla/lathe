@@ -17,6 +17,7 @@ export const historyWipe = () => invoke("history_wipe");
 export const historyPaste = (id, raw) => invoke("history_paste", { id, raw });
 export const autostartEnabled = () => invoke("autostart_enabled");
 export const setAutostart = (enabled) => invoke("set_autostart", { enabled });
+export const platform = () => invoke("platform");
 export const downloadableModels = () => invoke("downloadable_models");
 export const downloadProgress = () => invoke("download_progress");
 export const startDownload = (file) => invoke("start_download", { file });
