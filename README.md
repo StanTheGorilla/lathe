@@ -113,7 +113,8 @@ to the executable. The reasoning is written out at the top of the script.
 ### Other platforms
 
 `scripts/build.sh` is the macOS and Linux counterpart. It needs Rust, CMake, Ninja and
-Node.js; Linux additionally needs the Vulkan headers and `glslc`, plus the WebKitGTK,
+Node.js; Linux additionally needs the Vulkan headers, `glslc`, `glslang-tools` and
+`spirv-headers` (ggml compiles its shaders at build time), plus the WebKitGTK,
 GTK 3, libayatana-appindicator and ALSA development packages that any Tauri app needs.
 `.github/workflows/build.yml` has the exact `apt` and `brew` lines.
 

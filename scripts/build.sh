@@ -54,6 +54,8 @@ esac
 
 cd "$root"
 
+# The ${arr[@]+"${arr[@]}"} expansions below are for macOS's bash 3.2, where an empty
+# array trips `set -u`.
 if [ "$dev" = 1 ]; then
     profile_dir="$root/target/debug"
     profile_flag=()
@@ -88,10 +90,10 @@ if [ ! -d "$root/ui/node_modules" ]; then
 fi
 npm --prefix "$root/ui" run build
 
-cargo build -p lathe-core "${profile_flag[@]}"
+cargo build -p lathe-core ${profile_flag[@]+"${profile_flag[@]}"}
 copy_crispasr_runtime
 
-cargo build "${profile_flag[@]}" "${cargo_args[@]}"
+cargo build ${profile_flag[@]+"${profile_flag[@]}"} ${cargo_args[@]+"${cargo_args[@]}"}
 copy_crispasr_runtime
 
 if [ "$bundle" = 1 ]; then
