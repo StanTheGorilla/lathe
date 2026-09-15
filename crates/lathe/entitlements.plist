@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The microphone. Under the hardened runtime a signed app without this
+         entitlement is killed on its first capture, not prompted. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- The update check and model downloads. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

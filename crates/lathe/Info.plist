@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Shown in the system's microphone prompt. Without this key the prompt never
+         appears and the first capture is refused. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Lathe records your voice while the hotkey is held and transcribes it on this machine.</string>
+</dict>
+</plist>

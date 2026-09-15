@@ -6,7 +6,8 @@
       "../../target/release/*.dylib": "./"
     },
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "entitlements": "entitlements.plist"
     }
   }
 }

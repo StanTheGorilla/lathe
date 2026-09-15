@@ -88,6 +88,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: brew install cmake ninja
       - run: cargo install tauri-cli --version "^2" --locked
+      # Signing and notarisation happen inside the bundler when these variables exist.
+      # Only the ones that are actually set are exported: an unset secret arrives as an
+      # empty string, and the bundler treats an empty APPLE_CERTIFICATE as a certificate
+      # to import rather than as absent. A fork without the secrets still builds. See
+      # the README, "Signing the installers", for what each one is.
+      - name: Enable signing when the Apple secrets are set
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              { echo "$name<<__LATHE_EOF__"; echo "${!name}"; echo "__LATHE_EOF__"; } >> "$GITHUB_ENV"
+            fi
+          done
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then echo "Signing as $APPLE_SIGNING_IDENTITY"; else echo "Unsigned build"; fi
       - run: ./scripts/build.sh --bundle
       - run: cargo test --workspace --release
       - uses: actions/upload-artifact@v4
