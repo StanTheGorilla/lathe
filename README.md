@@ -1,11 +1,17 @@
 <img src="assets/banner.svg" alt="Lathe" width="206" height="68">
 
 <p>
-  <a href="#how-it-works"><img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-1c1c1a?style=flat-square&labelColor=35342f"></a>
-  <a href="#building"><img alt="Rust" src="https://img.shields.io/badge/Rust-stable%20MSVC-d97757?style=flat-square&labelColor=35342f"></a>
+  <a href="#how-it-works"><img alt="Windows, macOS, Linux" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-1c1c1a?style=flat-square&labelColor=35342f"></a>
+  <a href="https://github.com/StanTheGorilla/lathe/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/StanTheGorilla/lathe?style=flat-square&labelColor=35342f&color=d97757&label=download"></a>
+  <a href="#building"><img alt="Rust" src="https://img.shields.io/badge/Rust-stable-d97757?style=flat-square&labelColor=35342f"></a>
   <a href="#hardware"><img alt="Vulkan" src="https://img.shields.io/badge/GPU-Vulkan-6a9bcc?style=flat-square&labelColor=35342f"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/licence-MIT-788c5d?style=flat-square&labelColor=35342f"></a>
 </p>
+
+Hold a key, talk, release. Punctuated, tidied text lands where your cursor is. Speech
+recognition and cleanup run on your own GPU: nothing leaves the machine, nothing needs
+an account. **[Download the latest release](https://github.com/StanTheGorilla/lathe/releases/latest)**
+for Windows, macOS or Linux, then fetch the models from the Models tab.
 
 ## Why this exists
 
@@ -27,7 +33,8 @@ dictation. Both are freed again when you are done.
 | | |
 |---|---|
 | **Push-to-talk or tap-to-toggle** | Hold for as long as you speak, or tap once to start and again to stop. One threshold decides which you meant. |
-| **Presets** | Bundles of tone, structure, context and language. Switch from the tray, or bind a preset to its own hotkey. |
+| **Presets** | Bundles of tone, structure and context. Switch from the tray, or bind a preset to its own hotkey. |
+| **Rewrite, if asked** | Cleanup keeps every word. A preset can instead ask the multilingual model to reshape what you said into a prompt for an AI assistant, structured notes, or fewer words -- off by default, and it must keep every point you made. |
 | **Vocabulary** | Word lists that repair the proper nouns recognisers always get wrong, matched phonetically rather than by a blunt find-and-replace. |
 | **Polish, and 20+ other languages** | Non-English dictation is recognised *and* cleaned, via a second multilingual model. |
 | **History** | The last 200 dictations, searchable, re-pastable, stored in a local SQLite file. |
@@ -127,19 +134,53 @@ from the Actions tab for one platform at a time.
 What differs from Windows, all of it by necessity rather than choice:
 
 - **macOS** needs the Accessibility permission (System Settings > Privacy & Security)
-  to hear the hotkey and to type; it asks on first launch. The default binding is
-  **Option+Space**. Other applications cannot be quietened while recording, because
-  macOS has no per-application volume.
+  to hear the hotkey and to type. It asks on first launch, waits for the permission to
+  be granted, and restarts itself, because a keyboard tap created before the grant
+  stays dead. The default binding is **Option+Space**. Other applications cannot be
+  quietened while recording, because macOS has no per-application volume.
 - **Linux** reads the keyboard through `/dev/input`, so the user must be in the `input`
-  group, and pastes through a `uinput` virtual keyboard, which needs a udev rule:
+  group (`sudo usermod -aG input $USER`, then log in again), and pastes through a
+  `uinput` virtual keyboard, which needs a udev rule:
   `KERNEL=="uinput", GROUP="input", MODE="0660"` in
-  `/etc/udev/rules.d/70-lathe.rules`. This works under X11 and Wayland alike, but the
-  hotkey is not swallowed -- the focused application sees it too -- so the default is
-  **Ctrl+Alt+Space** and anything an editor already uses is a poor choice. All text
-  goes through the clipboard; there is no typed path. Ducking uses `pactl`, which
-  works with PulseAudio and PipeWire.
+  `/etc/udev/rules.d/70-lathe.rules`. The `.deb` installs that rule; the AppImage
+  cannot, and neither can add a user to a group. Whatever is still missing is named in a
+  notification at startup and, with the exact commands, under Settings > Hotkeys. This
+  works under X11 and Wayland alike, but the hotkey is not swallowed -- the focused
+  application sees it too -- so the default is **Ctrl+Alt+Space** and anything an
+  editor already uses is a poor choice. All text goes through the clipboard; there is
+  no typed path. Ducking uses `pactl`, which works with PulseAudio and PipeWire.
 - The models download from the Models tab on every platform; `fetch-models.ps1` is
   Windows-only.
+
+### Signing the installers
+
+The installers on the releases page are unsigned until the certificates exist, so
+SmartScreen warns on Windows and Gatekeeper refuses on macOS ("Lathe.app is damaged"
+-- it is not; right-click > Open, or `xattr -d com.apple.quarantine Lathe.app`).
+
+The macOS build signs and notarises itself when six repository secrets are set; nothing
+else changes. They come from an Apple Developer Program membership:
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | a "Developer ID Application" certificate exported from Keychain Access as a `.p12`, then `base64 -i cert.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | the password given when exporting it |
+| `APPLE_SIGNING_IDENTITY` | the certificate's name, `Developer ID Application: Name (TEAMID)` |
+| `APPLE_ID` | the Apple ID of the account |
+| `APPLE_PASSWORD` | an app-specific password for it, from appleid.apple.com |
+| `APPLE_TEAM_ID` | the ten-character team identifier |
+
+Windows signing is not wired up yet; it needs a code-signing identity (Azure Trusted
+Signing is the cheapest route that clears SmartScreen at once) and a `signCommand` in
+`tauri.windows.conf.json`.
+
+## Updates
+
+Once a day Lathe asks GitHub's releases list whether there is a newer version -- one
+anonymous request, nothing downloaded, nothing about the machine sent. When there is,
+a notification says so, the tray menu gets an **Update to x.y.z** item, and the About
+screen shows a button to the release page. The check can be switched off under About,
+where **Check now** still works by hand.
 
 ## Configuration
 
