@@ -27,3 +27,7 @@ export const pickModelsDir = (current) => invoke("pick_models_dir", { current })
 export const planModelsMove = (to) => invoke("plan_models_move", { to });
 export const setModelsDir = (dir, moveExisting) =>
   invoke("set_models_dir", { dir, moveExisting });
+export const updateStatus = () => invoke("update_status");
+export const checkForUpdates = () => invoke("check_for_updates");
+export const openReleasePage = (url) => invoke("open_release_page", { url });
+export const setupStatus = () => invoke("setup_status");

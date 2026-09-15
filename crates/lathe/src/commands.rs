@@ -535,3 +535,31 @@ pub fn set_models_dir(dir: String, move_existing: bool, state: State<'_, AppStat
 pub fn last_hotkey(state: State<'_, AppState>) -> Reply<Option<(String, String)>> {
     Ok(state.last_hotkey.lock().unwrap().clone())
 }
+
+/// Amendment A31: the running version and what the last update check found.
+#[tauri::command]
+pub fn update_status(state: State<'_, AppState>) -> Reply<crate::update::Status> {
+    Ok(state.update.lock().unwrap().clone())
+}
+
+/// The About screen's "Check now". Works whether or not the daily check is on.
+#[tauri::command]
+pub async fn check_for_updates(app: tauri::AppHandle) -> Reply<crate::update::Status> {
+    tauri::async_runtime::spawn_blocking(move || crate::update::check_now(&app))
+        .await
+        .map_err(fail)
+}
+
+#[tauri::command]
+pub fn open_release_page(url: String) -> Reply<()> {
+    crate::update::open_release_page(&url);
+    Ok(())
+}
+
+/// What the platform still needs from the user before dictation can work: the
+/// Accessibility permission on macOS, the input group and the udev rule on Linux.
+/// Empty on Windows and on a machine that is set up.
+#[tauri::command]
+pub fn setup_status() -> Reply<Vec<crate::setup::Problem>> {
+    Ok(crate::setup::problems())
+}

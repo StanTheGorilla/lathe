@@ -15,7 +15,9 @@
 #![windows_subsystem = "windows"]
 
 mod commands;
+mod setup;
 mod tray;
+mod update;
 mod worker;
 
 use anyhow::Result;
@@ -46,6 +48,8 @@ pub struct AppState {
     /// The last binding the hook matched, for the hotkey tester in settings. This is
     /// only ever written for combinations Lathe is bound to -- it is not a log of keys.
     pub last_hotkey: Arc<Mutex<Option<(String, String)>>>,
+    /// What the update check last found. Amendment A31.
+    pub update: update::Shared,
 }
 
 /// The flags that print something and exit. Only these want a console.
@@ -331,6 +335,7 @@ fn run(args: &[String]) -> Result<()> {
         hotkey_label: hotkey_label.clone(),
         paste_raw_label: paste_raw_label.clone(),
         last_hotkey: Arc::clone(&last_hotkey),
+        update: update::shared(),
     };
 
     let open_settings_at_start = args.iter().any(|a| a == "--settings");
@@ -372,6 +377,10 @@ fn run(args: &[String]) -> Result<()> {
             commands::pick_models_dir,
             commands::set_models_dir,
             commands::last_hotkey,
+            commands::update_status,
+            commands::check_for_updates,
+            commands::open_release_page,
+            commands::setup_status,
         ])
         .setup(move |app| {
             build_tray(app.handle(), &config.lock().unwrap(), &hotkey_label, &paste_raw_label)?;
@@ -392,6 +401,9 @@ fn run(args: &[String]) -> Result<()> {
             if open_settings_at_start {
                 open_settings(app.handle());
             }
+
+            update::spawn_checker(app.handle().clone());
+            setup::check_at_startup(app.handle().clone());
 
             // On the very first run the tray icon is the only thing that appeared, and
             // nothing has told the user which key starts a dictation. Section 8 rules
@@ -481,6 +493,19 @@ fn tray_menu(
         )?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    // Amendment A31: present only while a newer release is known.
+    if let Some(available) = app
+        .try_state::<AppState>()
+        .and_then(|s| s.update.lock().unwrap().available.clone())
+    {
+        menu.append(&MenuItem::with_id(
+            app,
+            "update",
+            format!("Update to {}", available.version),
+            true,
+            None::<&str>,
+        )?)?;
+    }
     menu.append(&MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Quit Lathe", true, None::<&str>)?)?;
     Ok(menu)
@@ -545,6 +570,14 @@ fn build_tray(app: &AppHandle, config: &Config, hotkey: &str, paste_raw: &str) -
                 app.exit(0);
             } else if id == "settings" {
                 open_settings(app);
+            } else if id == "update" {
+                let url = app
+                    .try_state::<AppState>()
+                    .and_then(|s| s.update.lock().unwrap().available.clone())
+                    .map(|a| a.url);
+                if let Some(url) = url {
+                    update::open_release_page(&url);
+                }
             } else if let Some(code) = id.strip_prefix("language:") {
                 switch_language(app, code);
                 refresh_tray(app);
