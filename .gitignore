@@ -33,3 +33,7 @@ lathe.out
 
 # Working notes, not published
 /docs
+
+# graphify knowledge graph: a local tool, rebuilt from the sources (see CLAUDE.md)
+/graphify-out
+/.graphify_*

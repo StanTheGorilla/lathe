@@ -1,0 +1,62 @@
+# graphify input scoping (local tool config, not a build input).
+#
+# Scope the graph to exactly: crates/, ui/src/, scripts/, .github/workflows/,
+# README.md, CLAUDE.md, docs/{BRIEF,AMENDMENTS,HANDOFF}.md. Everything else at
+# the repo root (assets/, packaging/, Cargo.*, LICENSE, rust-toolchain.toml,
+# ui's own package files, test.wav, etc.) is left out, not because it's
+# sensitive, but because it isn't part of what was asked for.
+#
+# Standard gitignore semantics: a directory must be un-ignored before its
+# contents can be, so each included path is un-ignored one level at a time.
+
+# Ignore everything at the repo root by default.
+/*
+
+# Rust workspace sources.
+!/crates/
+!/crates/**
+
+# Build/CI scripts (includes scripts/quant/ - the reproducible measurement
+# code, not the /quant/ working directory of private dictations, which stays
+# ignored below).
+!/scripts/
+!/scripts/**
+
+# CI workflow definitions. .github/ only contains workflows/, so this is
+# equivalent to including all of .github/.
+!/.github/
+!/.github/**
+
+# Top-level docs.
+!/README.md
+!/CLAUDE.md
+
+# Working notes (excluded from git by the root .gitignore, but wanted here).
+!/docs/
+!/docs/**
+
+# Svelte UI: only the source, not node_modules/dist/config/lockfiles.
+!/ui/
+/ui/*
+!/ui/src/
+!/ui/src/**
+
+# Hard excludes, kept explicit even though most are already covered by the
+# allowlist above or by graphify's built-in noise-dir skips. quant/ and
+# recordings*/ hold the owner's private dictations and must never be read.
+/target/
+/quant/
+/recordings/
+/recordings-pl/
+/cue-audition/
+/.tools/
+/models/
+*.wav
+*.gguf
+*.bin
+*.jsonl
+*.db
+*.log
+
+# Tauri-generated permission schemas: thousands of JSON keys, no knowledge in them.
+/crates/lathe/gen/
