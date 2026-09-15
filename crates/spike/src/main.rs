@@ -383,6 +383,7 @@ fn main() -> Result<()> {
                     Context::General,
                     threads(),
                     "English",
+                    &[],
                 )?;
                 let total = transcript.infer_ms + cleaned.infer_ms;
                 println!(
@@ -622,6 +623,7 @@ fn run_cleanup(
         context,
         threads(),
         lathe_core::engine::language_name(lang),
+        &[],
     )?;
     eprintln!(
         "s1-mini: {}ms, {} tokens generated",
@@ -706,6 +708,7 @@ fn cleanup_eval(
             first.context,
             threads(),
             language,
+            &[],
         )?;
     }
 
@@ -720,6 +723,7 @@ fn cleanup_eval(
             item.context,
             threads(),
             language,
+            &[],
         )?;
         eprint!("\r{}/{total}", i + 1);
         outputs.push(EvalOutput {

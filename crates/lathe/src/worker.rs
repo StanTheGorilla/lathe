@@ -193,9 +193,9 @@ fn benchmark(engine: &mut Engine, config: &Config, ui: &Ui) -> Result<BenchRepor
 
     let preset = config.active().clone();
     let started = Instant::now();
-    let already_loaded = engine.loaded(config.languages.current());
+    let already_loaded = engine.loaded(config, &preset);
     engine
-        .ensure_loaded(config, config.languages.current(), &|_| {})
+        .ensure_loaded(config, &preset, &|_| {})
         .map_err(|e| format!("{e:#}"))?;
     let load_ms = if already_loaded {
         0
@@ -280,7 +280,7 @@ fn dictate(
         .clone();
 
     ui.cue(Cue::Start);
-    let ready = engine.loaded(config.languages.current());
+    let ready = engine.loaded(config, &preset);
     ui.state(if ready {
         State::Recording
     } else {
@@ -288,7 +288,7 @@ fn dictate(
     });
 
     if !ready {
-        if let Err(e) = engine.ensure_loaded(config, config.languages.current(), &|_| {}) {
+        if let Err(e) = engine.ensure_loaded(config, &preset, &|_| {}) {
             ui.error("Lathe could not load the models", &format!("{e:#}"));
             return;
         }

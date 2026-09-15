@@ -142,10 +142,10 @@
   {/each}
 </div>
 
-{#if preset.name === "Prompt"}
+{#if preset.name === "Prompt" && preset.rewrite === "off"}
   <div class="status info">
     Cleanup punctuates and removes fillers. It does not restructure rambling into a
-    well-formed prompt -- that needs a second, general-purpose model.
+    well-formed prompt; the Rewrite setting below does, with the multilingual model.
   </div>
 {/if}
 
@@ -180,7 +180,7 @@
   <select
     id="structure"
     value={preset.structure}
-    disabled={!preset.cleanup}
+    disabled={!preset.cleanup || preset.rewrite !== "off"}
     onchange={(e) => set("structure", e.currentTarget.value)}
   >
     <option value="prose">prose</option>
@@ -196,13 +196,35 @@
   <select
     id="context"
     value={preset.context}
-    disabled={!preset.cleanup}
+    disabled={!preset.cleanup || preset.rewrite !== "off"}
     onchange={(e) => set("context", e.currentTarget.value)}
   >
     <option value="general">general</option>
     <option value="email">email</option>
   </select>
   <p class="hint">Email adds a greeting, paragraph breaks and a sign-off.</p>
+</div>
+
+<div class="field">
+  <label for="rewrite">Rewrite</label>
+  <select
+    id="rewrite"
+    value={preset.rewrite ?? "off"}
+    disabled={!preset.cleanup}
+    onchange={(e) => set("rewrite", e.currentTarget.value)}
+  >
+    <option value="off">off -- keep every word</option>
+    <option value="prompt">prompt for an AI assistant</option>
+    <option value="notes">structured notes</option>
+    <option value="concise">the same thing in fewer words</option>
+  </select>
+  <p class="hint">
+    Off, the cleanup model may only fix punctuation and drop fillers. A rewrite is free to
+    change the words while keeping every point you made, and goes through the
+    multilingual model in every language, so S1-mini and the Structure and Context
+    settings above do not apply. Needs the multilingual model from Models; without it the
+    text is cleaned the ordinary way.
+  </p>
 </div>
 
 <h2>Behaviour</h2>

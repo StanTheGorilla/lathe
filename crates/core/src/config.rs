@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::cleanup::{Context, Structure, Styling};
+use crate::cleanup::{Context, Rewrite, Structure, Styling};
 
 pub fn config_dir() -> Result<PathBuf> {
     let base = dirs::config_dir().context("no roaming AppData directory")?;
@@ -41,7 +41,22 @@ pub struct Config {
     pub output: Output,
     pub vocabulary: crate::vocabulary::Vocabulary,
     pub history: HistoryConfig,
+    pub updates: Updates,
     pub presets: Vec<Preset>,
+}
+
+/// Amendment A31: the daily check against GitHub's releases. Only the automatic check
+/// is switchable; the About screen can always ask by hand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    pub check: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 /// The language being dictated. A preset says how the text should come out; this says
@@ -220,6 +235,11 @@ pub struct Preset {
     pub replacements: Vec<crate::vocabulary::Replacement>,
     #[serde(default)]
     pub hotkey: Option<String>,
+    /// Amendment A33: an opt-in rewrite through the instruction model. Off on every
+    /// default preset; a preset that turns it on skips S1-mini and needs the
+    /// multilingual model, which is the only one that can be asked.
+    #[serde(default)]
+    pub rewrite: Rewrite,
 }
 
 fn yes() -> bool {
@@ -321,6 +341,7 @@ impl Default for Config {
             output: Output::default(),
             vocabulary: crate::vocabulary::Vocabulary::default(),
             history: HistoryConfig::default(),
+            updates: Updates::default(),
             presets: default_presets(),
         }
     }
@@ -339,6 +360,7 @@ fn default_presets() -> Vec<Preset> {
             vocabulary_sets: vec![],
             replacements: crate::vocabulary::default_replacements(),
             hotkey: None,
+            rewrite: Rewrite::Off,
         },
         Preset {
             name: "Message".into(),
@@ -350,6 +372,7 @@ fn default_presets() -> Vec<Preset> {
             vocabulary_sets: vec![],
             replacements: crate::vocabulary::default_replacements(),
             hotkey: None,
+            rewrite: Rewrite::Off,
         },
         Preset {
             name: "Email".into(),
@@ -361,6 +384,7 @@ fn default_presets() -> Vec<Preset> {
             vocabulary_sets: vec![],
             replacements: crate::vocabulary::default_replacements(),
             hotkey: None,
+            rewrite: Rewrite::Off,
         },
         Preset {
             name: "Notes".into(),
@@ -372,6 +396,7 @@ fn default_presets() -> Vec<Preset> {
             vocabulary_sets: vec![],
             replacements: crate::vocabulary::default_replacements(),
             hotkey: None,
+            rewrite: Rewrite::Off,
         },
         Preset {
             name: "Raw".into(),
@@ -383,6 +408,7 @@ fn default_presets() -> Vec<Preset> {
             vocabulary_sets: vec![],
             replacements: crate::vocabulary::default_replacements(),
             hotkey: None,
+            rewrite: Rewrite::Off,
         },
     ]
 }

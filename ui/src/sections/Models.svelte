@@ -280,10 +280,10 @@
 )}
 
 {@render slot(
-  "Cleanup, other languages",
+  "Cleanup, other languages and rewrites",
   "cleanup_multilingual",
   MULTILINGUAL,
-  "A general model doing the same job for languages S1-mini does not cover. Optional; without it non-English speech is recognised but pasted uncleaned.",
+  "A general model doing the same job for languages S1-mini does not cover, and the only one that can rewrite (Presets > Rewrite). Optional; without it non-English speech is recognised but pasted uncleaned.",
 )}
 
 {#if progress && !progress.finished}

@@ -83,19 +83,27 @@ impl Engine {
         (gpu.device, if gpu.offload { 999 } else { 0 })
     }
 
-    /// Whether everything *this language* needs is resident.
+    /// Whether this dictation goes through the instruction model rather than S1-mini:
+    /// any language S1-mini does not cover (amendment A21), and any preset that asks
+    /// for a rewrite (amendment A33), which only an instruction model can be asked for.
+    pub fn wants_instruct(config: &Config, preset: &Preset) -> bool {
+        !config.languages.current().eq_ignore_ascii_case("en")
+            || (preset.cleanup && preset.rewrite != crate::cleanup::Rewrite::Off)
+    }
+
+    /// Whether everything *this dictation* needs is resident.
     ///
     /// Amendment A21 loads one cleanup model per language, so "loaded" is meaningless
     /// without one: a session that has dictated in English has the speech model and
     /// S1-mini, and still needs Gemma before it can clean a word of Polish.
-    pub fn loaded(&self, language: &str) -> bool {
+    pub fn loaded(&self, config: &Config, preset: &Preset) -> bool {
         if self.asr.is_none() {
             return false;
         }
-        if language.eq_ignore_ascii_case("en") {
-            self.cleanup.is_some()
-        } else {
+        if Self::wants_instruct(config, preset) {
             self.cleanup_multilingual.is_some() || self.cleanup_multilingual_missing
+        } else {
+            self.cleanup.is_some()
         }
     }
 
@@ -106,17 +114,17 @@ impl Engine {
     /// after process start, separate from model load. Without this warmup that cost
     /// lands inside the user's first dictation, while brief 4.4 has already told them
     /// loading is finished.
-    /// `language` is the preset's code, so only the cleanup model that language needs
-    /// gets loaded. Loading both would cost 2.3GB of VRAM and several seconds for a user
-    /// who never dictates in the other one.
+    /// Only the cleanup model this dictation needs gets loaded. Loading both would
+    /// cost 2.3GB of VRAM and several seconds for a user who never needs the other one.
     pub fn ensure_loaded(
         &mut self,
         config: &Config,
-        language: &str,
+        preset: &Preset,
         progress: &dyn Fn(&str),
     ) -> Result<()> {
-        let english = language.eq_ignore_ascii_case("en");
-        if self.loaded(language) {
+        let language = config.languages.current();
+        let english = !Self::wants_instruct(config, preset);
+        if self.loaded(config, preset) {
             self.last_used = Instant::now();
             return Ok(());
         }
@@ -126,10 +134,10 @@ impl Engine {
         // one lands in system memory and runs 20-40x slower -- Polish cleanup was taking
         // 35-90 s. Switching language costs a 1-2 s reload instead.
         if english && self.cleanup_multilingual.take().is_some() {
-            eprintln!("multilingual cleanup model unloaded: switching to English");
+            eprintln!("instruction model unloaded: switching to S1-mini");
         }
         if !english && self.cleanup.take().is_some() {
-            eprintln!("s1-mini unloaded: switching to {language}");
+            eprintln!("s1-mini unloaded: switching to the instruction model ({language})");
         }
 
         self.report_vram(config, english);
@@ -181,6 +189,23 @@ impl Engine {
                     path.display()
                 );
                 self.cleanup_multilingual_missing = true;
+                // A rewrite preset in English can still be cleaned the ordinary way,
+                // which beats pasting raw speech because one optional file is absent.
+                if language.eq_ignore_ascii_case("en") && self.cleanup.is_none() {
+                    eprintln!("the rewrite needs that model; cleaning with S1-mini instead");
+                    progress("Loading cleanup model");
+                    let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
+                    let backend = Self::backend_mut(&mut self.backend)?;
+                    let (cleanup, ms) = Cleanup::load(
+                        backend,
+                        &config.cleanup_path(),
+                        device,
+                        layers,
+                        crate::cleanup::Flavour::S1Mini,
+                    )?;
+                    eprintln!("s1-mini loaded in {ms}ms");
+                    self.cleanup = Some(cleanup);
+                }
             }
         }
 
@@ -244,7 +269,7 @@ impl Engine {
         let cleanup = if english {
             self.cleanup.as_ref()
         } else {
-            self.cleanup_multilingual.as_ref()
+            self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
         };
         if let (Some(cleanup), Some(backend)) = (cleanup, &self.backend) {
             let _ = cleanup.normalize(
@@ -255,6 +280,7 @@ impl Engine {
                 crate::cleanup::Context::General,
                 config.models.threads,
                 "English",
+                &[],
             );
         }
         eprintln!("warmup took {}ms", started.elapsed().as_millis());
@@ -338,14 +364,18 @@ impl Engine {
 
         // Brief 4.2 restricted cleanup to English because S1-mini is English only. It
         // still is; amendment A21 adds a second, multilingual model for everything else,
-        // so a non-English preset is cleaned rather than passed through raw.
+        // so a non-English preset is cleaned rather than passed through raw. Amendment
+        // A33 sends a rewrite preset through that same model in any language.
         let (cleaned, cleanup_ms) = if preset.cleanup {
-            let english = lang.eq_ignore_ascii_case("en");
-            let model = if english {
-                self.cleanup.as_ref()
+            let instruct = Self::wants_instruct(config, preset);
+            let model = if instruct {
+                // Absent, and in English, S1-mini was loaded in its place.
+                self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
             } else {
-                self.cleanup_multilingual.as_ref()
+                self.cleanup.as_ref()
             };
+            // The instruction model can be told the vocabulary; S1-mini ignores it.
+            let terms = vocabulary.terms(64);
 
             match model {
                 Some(model) => {
@@ -353,15 +383,29 @@ impl Engine {
                         .backend
                         .as_ref()
                         .context("llama backend is not initialised")?;
-                    let result = model.normalize(
-                        backend,
-                        &transcript.text,
-                        preset.styling,
-                        preset.structure,
-                        preset.context,
-                        config.models.threads,
-                        language_name(lang),
-                    )?;
+                    let rewrite = preset.rewrite;
+                    let result = if rewrite != crate::cleanup::Rewrite::Off && model.can_rewrite() {
+                        model.rewrite(
+                            backend,
+                            &transcript.text,
+                            rewrite,
+                            preset.styling,
+                            config.models.threads,
+                            language_name(lang),
+                            &terms,
+                        )?
+                    } else {
+                        model.normalize(
+                            backend,
+                            &transcript.text,
+                            preset.styling,
+                            preset.structure,
+                            preset.context,
+                            config.models.threads,
+                            language_name(lang),
+                            &terms,
+                        )?
+                    };
                     (result.text, result.infer_ms)
                 }
                 // The multilingual model is optional: it is a 2.3GB download and a

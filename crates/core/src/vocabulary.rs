@@ -163,6 +163,16 @@ impl Vocabulary {
             .join(", ")
     }
 
+    /// The same terms as a list, for the instruction prompt (amendment A33). Capped
+    /// like the hotwords: every term costs prompt tokens on every dictation.
+    pub fn terms(&self, limit: usize) -> Vec<String> {
+        self.enabled_terms()
+            .into_iter()
+            .take(limit)
+            .map(|t| t.write.clone())
+            .collect()
+    }
+
     /// Pass 2. Returns the corrected text and how many words changed.
     pub fn correct(&self, text: &str) -> (String, usize) {
         if !self.correction_enabled || text.is_empty() {
