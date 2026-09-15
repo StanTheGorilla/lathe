@@ -1,0 +1,9 @@
+#!/bin/sh
+# Applies the udev rule that lets Lathe open /dev/uinput for pasting.
+set -e
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=misc || true
+fi
+echo "Lathe reads the keyboard through /dev/input: add yourself to the input group"
+echo '(sudo usermod -aG input $USER) and log in again before the first dictation.'

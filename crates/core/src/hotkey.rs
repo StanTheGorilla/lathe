@@ -21,6 +21,10 @@ mod linux;
 use self::linux as platform;
 #[cfg(target_os = "linux")]
 pub(crate) use self::linux::modifiers_up as linux_modifiers_up;
+#[cfg(target_os = "linux")]
+pub use self::linux::keyboard_readable as linux_keyboard_readable;
+#[cfg(target_os = "macos")]
+pub use self::macos::accessibility_trusted as macos_accessibility_trusted;
 
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::Sender;

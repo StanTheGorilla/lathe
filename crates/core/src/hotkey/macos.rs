@@ -194,11 +194,13 @@ unsafe extern "C" fn tap_callback(
 }
 
 /// Asks the system whether this process may watch the keyboard, showing the standard
-/// prompt if not. The answer is only advisory: the tap creation below is what fails.
-fn accessibility_trusted() -> bool {
+/// prompt if not and `prompt` is set. The answer is only advisory: the tap creation
+/// below is what fails. The app polls this at startup and restarts itself once the
+/// permission arrives, since a tap created before it was granted stays dead.
+pub fn accessibility_trusted(prompt: bool) -> bool {
     let options = CFDictionary::from_CFType_pairs(&[(
         CFString::new("AXTrustedCheckOptionPrompt").as_CFType(),
-        CFBoolean::true_value().as_CFType(),
+        CFBoolean::from(prompt).as_CFType(),
     )]);
     unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) }
 }
@@ -213,7 +215,7 @@ pub(super) fn listen(bindings: Vec<Bound>, raw_tx: Sender<RawKey>) {
             .collect(),
     );
 
-    if !accessibility_trusted() {
+    if !accessibility_trusted(false) {
         eprintln!(
             "hotkey: Lathe is not trusted for Accessibility; allow it under System Settings > \
              Privacy & Security > Accessibility, then restart"

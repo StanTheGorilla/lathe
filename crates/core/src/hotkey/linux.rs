@@ -144,6 +144,12 @@ fn is_keyboard(device: &Device) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether at least one keyboard under /dev/input can be opened. `evdev::enumerate`
+/// only yields devices that open, so a user outside the `input` group sees none.
+pub fn keyboard_readable() -> bool {
+    evdev::enumerate().any(|(_, device)| is_keyboard(&device))
+}
+
 /// Reads one keyboard until it goes away.
 fn read_device(
     mut device: Device,

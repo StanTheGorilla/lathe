@@ -14,7 +14,11 @@
           "libvulkan1",
           "pulseaudio-utils",
           "libnotify-bin"
-        ]
+        ],
+        "files": {
+          "/usr/lib/udev/rules.d/70-lathe.rules": "../../packaging/linux/70-lathe.rules"
+        },
+        "postInstallScript": "../../packaging/linux/postinst"
       }
     }
   }

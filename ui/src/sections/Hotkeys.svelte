@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { autostartEnabled, setAutostart, lastHotkey, platform } from "../api.js";
+  import { autostartEnabled, setAutostart, lastHotkey, platform, setupStatus } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
@@ -11,12 +11,21 @@
   // Which platform this is on decides the name of the Win/Cmd/Super key and the
   // advice below the binding.
   let os = $state({ os: "windows", super_key: "Win" });
+  // Amendment A32: what the platform still needs before the hotkey can work. Empty on
+  // Windows; the Accessibility permission on macOS, the input group and the udev rule
+  // on Linux. Read once: fixing either means a restart or a new login anyway.
+  let problems = $state([]);
 
   onMount(async () => {
     try {
       os = await platform();
     } catch {
       /* the Windows defaults above stand */
+    }
+    try {
+      problems = await setupStatus();
+    } catch {
+      /* nothing worth reporting */
     }
     try {
       autostart = await autostartEnabled();
@@ -86,6 +95,13 @@
 </script>
 
 <h1>Hotkeys</h1>
+
+{#each problems as p}
+  <div class="status bad">
+    <strong>{p.title}.</strong> {p.detail}
+    <p style="margin:6px 0 0" class="mono">{p.fix}</p>
+  </div>
+{/each}
 
 <div class="status info">
   <strong>Press a Lathe hotkey now.</strong> Whatever it receives appears here, so you can

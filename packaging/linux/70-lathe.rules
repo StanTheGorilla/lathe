@@ -1,0 +1,4 @@
+# Lathe pastes by pressing Ctrl+V through a uinput virtual keyboard. /dev/uinput is
+# root-only by default; this opens it to the input group, which the user must be in
+# anyway to read the keyboard for the hotkey (sudo usermod -aG input $USER).
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660"
