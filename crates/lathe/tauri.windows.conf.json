@@ -4,6 +4,12 @@
     "targets": ["nsis"],
     "resources": {
       "../../target/release/*.dll": "./"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
     }
   }
 }
