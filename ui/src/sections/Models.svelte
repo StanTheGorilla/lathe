@@ -55,7 +55,7 @@
       size: "3.85 GB",
     },
     {
-      file: "whisper-large-v3-turbo-q5_0.gguf",
+      file: "ggml-large-v3-turbo-q5_0.bin",
       label: "Whisper large-v3-turbo  Q5_0",
       note: "Slower and less accurate on this hardware. Kept as an alternative.",
       size: "0.55 GB",
@@ -112,16 +112,40 @@
 
   const present = (file) => available.some((m) => m.file === file && m.present);
 
-  onMount(async () => {
+  // A failed download is reported on its own row; anything else (a move, a file not
+  // listed here) falls through to the block under the lists.
+  const ROWS = [...SPEECH, ...CLEANUP, ...MULTILINGUAL].map((o) => o.file);
+  const failed = (file) =>
+    progress && progress.finished && progress.error && progress.file === file;
+  const failureShownInline = $derived(
+    !!progress && !!progress.error && ROWS.includes(progress.file) && !present(progress.file),
+  );
+
+  onMount(() => {
+    load();
+    return () => {
+      if (poll) clearInterval(poll);
+    };
+  });
+
+  async function load() {
     try {
       adapters = (await listDevices()).adapters;
       status = await modelStatus();
       await refreshDownloads();
       progress = await downloadProgress();
+      // The download lives in the core, not in this window: it may have been started
+      // from an earlier visit to this tab, and it carries on while the tab is closed.
+      if (progress && !progress.finished) pollProgress(refreshModels);
     } catch (e) {
       error = String(e);
     }
-  });
+  }
+
+  async function refreshModels() {
+    await refreshDownloads();
+    status = await modelStatus();
+  }
 
   async function refreshDownloads() {
     try {
@@ -158,10 +182,7 @@
     error = "";
     try {
       await startDownload(file);
-      pollProgress(async () => {
-        await refreshDownloads();
-        status = await modelStatus();
-      });
+      pollProgress(refreshModels);
     } catch (e) {
       error = String(e);
     }
@@ -256,9 +277,12 @@
           <p class="choice-missing">
             {downloading ? `Downloading -- ${pct(progress)}%` : "Not downloaded."}
             <button class="inline" disabled={busy} onclick={() => download(o.file)}>
-              {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : "Get it"}
+              {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : failed(o.file) ? "Try again" : "Get it"}
             </button>
           </p>
+          {#if failed(o.file)}
+            <p class="choice-missing" style="color:var(--clay)">{progress.error}</p>
+          {/if}
         {/if}
       </div>
     {/each}
@@ -297,7 +321,7 @@
       </span>
     </div>
   </div>
-{:else if progress && progress.error}
+{:else if progress && progress.error && !failureShownInline}
   <div class="status bad" style="margin-top:12px">{progress.error}</div>
 {/if}
 

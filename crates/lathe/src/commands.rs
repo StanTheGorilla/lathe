@@ -411,6 +411,8 @@ pub fn start_download(file: String, state: State<'_, AppState>) -> Reply<()> {
         if let Some(p) = shared.lock().unwrap().as_mut() {
             p.finished = true;
             if let Err(e) = result {
+                // The window may be closed by the time it fails; the log keeps it.
+                eprintln!("download of {file} failed: {e:#}");
                 p.error = format!("{e:#}");
             }
         }

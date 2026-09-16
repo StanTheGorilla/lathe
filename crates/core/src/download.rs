@@ -133,12 +133,14 @@ pub const KNOWN: &[Known] = &[
         approx_bytes: 2_530_000_000,
         required: false,
     },
+    // whisper.cpp's own ggml container, not GGUF: CrispASR's whisper backend is
+    // whisper.cpp's loader and reads nothing else. Amendment A35.
     Known {
-        file: "whisper-large-v3-turbo-q5_0.gguf",
+        file: "ggml-large-v3-turbo-q5_0.bin",
         label: "Whisper large-v3-turbo Q5_0",
         role: "Speech (alternative)",
-        url: "https://huggingface.co/oxide-lab/whisper-large-v3-turbo-GGUF/resolve/main/whisper-large-v3-turbo-q5_0.gguf",
-        approx_bytes: 574_000_000,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+        approx_bytes: 574_041_195,
         required: false,
     },
 ];
@@ -164,8 +166,13 @@ pub fn fetch(
     let final_path = dir.join(entry.file);
     let part_path = dir.join(format!("{}.part", entry.file));
 
+    // No cap on the body: the largest files are 4 GB and a slow line takes hours. ureq
+    // has no idle timeout, so only the handshake is bounded; a transfer that stalls
+    // outright waits for the socket to drop. Cancel works as long as bytes arrive.
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(60 * 60)))
+        .timeout_resolve(Some(std::time::Duration::from_secs(30)))
+        .timeout_connect(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(60)))
         .build()
         .new_agent();
 
@@ -180,6 +187,8 @@ pub fn fetch(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(entry.approx_bytes);
+    // The size is known before the first byte; say so rather than showing "0 of 0".
+    progress(0, total);
 
     let mut reader = response.body_mut().as_reader();
     let mut file = std::fs::File::create(&part_path)
@@ -459,5 +468,45 @@ mod tests {
         assert!(!to.join(A_MODEL).exists());
         assert!(!to.join(A_MODEL).with_extension("part").exists());
         assert!(from.join(A_MODEL).exists());
+    }
+
+    /// Serves one fixed body over HTTP on a loopback port, once.
+    fn serve_once(body: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        url
+    }
+
+    #[test]
+    fn the_size_is_reported_before_the_first_byte_and_the_file_lands() {
+        let dir = scratch("fetch");
+        let body = vec![9u8; 3000];
+        let entry: &'static Known = Box::leak(Box::new(Known {
+            file: "model.bin",
+            label: "",
+            role: "",
+            url: Box::leak(serve_once(body.clone()).into_boxed_str()),
+            approx_bytes: 1,
+            required: false,
+        }));
+
+        let mut reports = Vec::new();
+        fetch(entry, &dir, |done, total| reports.push((done, total)), &never()).unwrap();
+
+        assert_eq!(reports.first(), Some(&(0, 3000)));
+        assert_eq!(reports.last(), Some(&(3000, 3000)));
+        assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), body);
+        assert!(!dir.join("model.bin.part").exists());
     }
 }

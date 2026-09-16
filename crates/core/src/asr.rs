@@ -1,7 +1,7 @@
 // Speech recognition through CrispASR. Brief sections 4.1 and 4.3, and amendment A14.
 //
-// One runtime serves every model: Cohere Transcribe, Whisper (GGUF), and the Silero VAD
-// gate from 6.1. That is why whisper-rs is gone -- see A14 for the DLL collision that
+// One runtime serves every model: Cohere Transcribe, Whisper (whisper.cpp's own ggml
+// files, not GGUF -- see A35), and the Silero VAD gate from 6.1. That is why whisper-rs is gone -- see A14 for the DLL collision that
 // forced the choice, and for why it turned out to be the better architecture anyway.
 
 use anyhow::{anyhow, Result};
@@ -214,24 +214,40 @@ pub fn backend_biases(backend: &str) -> bool {
         .any(|b| backend.eq_ignore_ascii_case(b))
 }
 
-/// The backend a model file will run on, without loading the model. Reads the GGUF
+/// The backend a model file will run on, without loading the model. Reads the file
 /// header only, so it is cheap enough for a settings screen.
 pub fn backend_of(model: &Path) -> Option<String> {
     if !model.exists() {
         return None;
     }
-    Session::detect_backend(model.to_str()?).ok()
+    detect(model.to_str()?).ok()
 }
 
 /// The model file says which architecture it is; CrispASR reads that and names the
 /// backend to run it on.
 fn detect(path: &str) -> Result<String> {
+    if is_whisper_ggml(path) {
+        return Ok("whisper".into());
+    }
     Session::detect_backend(path).map_err(|e| {
         anyhow!(
             "could not identify the model architecture ({e}). \
-             Models must be GGUF; the legacy whisper.cpp .bin format is not supported."
+             Models must be GGUF, or a whisper.cpp ggml file."
         )
     })
+}
+
+/// Whisper weights are not GGUF: whisper.cpp's loader reads its own ggml container, and
+/// CrispASR's whisper backend is that loader. Its `crispasr_session_open` recognises
+/// the file by its magic the same way; the explicit-backend path this crate uses does
+/// not, so the check lives here.
+fn is_whisper_ggml(path: &str) -> bool {
+    use std::io::Read as _;
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && (&magic == b"lmgg" || &magic == b"ggjt")
 }
 
 /// What ggml reports a compute device as. Ordering matters: see `best_adapter`.

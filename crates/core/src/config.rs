@@ -434,29 +434,9 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let mut config: Config =
+        let config: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        config.migrate();
         Ok(config)
-    }
-
-    /// Carries older config files forward.
-    ///
-    /// The speech runtime changed from whisper.cpp to CrispASR (amendment A14), which
-    /// reads GGUF and not the legacy whisper.cpp .bin format. A config naming a .bin
-    /// would otherwise fail on the next dictation with an error about the file, which is
-    /// true but unhelpful.
-    fn migrate(&mut self) {
-        if self.models.whisper.ends_with(".bin") {
-            let previous = std::mem::replace(
-                &mut self.models.whisper,
-                Models::default().whisper,
-            );
-            eprintln!(
-                "config: speech model '{previous}' is the legacy whisper.cpp format, \n                 which is no longer supported; using '{}' instead",
-                self.models.whisper
-            );
-        }
     }
 
     pub fn to_toml(&self) -> Result<String> {
