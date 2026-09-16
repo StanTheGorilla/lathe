@@ -64,6 +64,7 @@
     { name: "ggml", role: "Tensor library and Vulkan backend", licence: "MIT" },
     { name: "Tauri", role: "Settings window", licence: "MIT / Apache 2.0" },
     { name: "Svelte", role: "Settings interface", licence: "MIT" },
+    { name: "Lucide", role: "Interface icons", licence: "ISC" },
   ];
 </script>
 

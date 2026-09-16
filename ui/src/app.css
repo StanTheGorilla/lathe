@@ -103,12 +103,14 @@ body {
 }
 
 .rail-item svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   flex: none;
   stroke: currentColor;
   fill: none;
-  stroke-width: 1.5;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .rail-spacer {
@@ -185,6 +187,14 @@ textarea {
   resize: vertical;
   min-height: 130px;
   user-select: text;
+}
+
+/* A locked field reads as text on the page; the sunken box means it can be typed in. */
+input[type="text"]:disabled,
+textarea:disabled {
+  background: var(--surface);
+  border-color: transparent;
+  cursor: default;
 }
 
 input:focus-visible,

@@ -11,6 +11,7 @@ export const startLevelMeter = () => invoke("start_level_meter");
 export const stopLevelMeter = () => invoke("stop_level_meter");
 export const runBenchmark = () => invoke("run_benchmark");
 export const configPath = () => invoke("config_path");
+export const defaultVocabularySets = () => invoke("default_vocabulary_sets");
 export const historyRecent = (search, limit) => invoke("history_recent", { search, limit });
 export const historyStats = () => invoke("history_stats");
 export const historyWipe = () => invoke("history_wipe");

@@ -430,77 +430,97 @@ fn match_case(original: &str, term: &str) -> String {
 /// The sets shipped by default: terms that appear throughout this project and would be
 /// spoken while working on it.
 fn default_sets() -> Vec<Set> {
-    let strings = |items: &[&str]| items.iter().map(|s| Term::new(*s)).collect::<Vec<_>>();
+    // Bare terms, then the ones with spoken forms: mishearings seen in real dictations
+    // that the phonetic net rejects. Only forms that are not themselves words are
+    // shipped, since a form is rewritten every time it is heard.
+    let strings = |items: &[&str], heard: &[Term]| {
+        items
+            .iter()
+            .map(|s| Term::new(*s))
+            .chain(heard.iter().cloned())
+            .collect::<Vec<_>>()
+    };
 
     vec![
         Set {
             name: "lathe".into(),
             enabled: true,
-            terms: strings(&[
-                "Cohere",
-                "Cohere Transcribe",
-                "Lathe",
-                "S1-mini",
-                "Superwhisper",
-                "CrispASR",
-                "Silero",
-                "Whisper",
-                "GGUF",
-                "VAD",
-            ]),
+            terms: strings(
+                &[
+                    "Cohere",
+                    "Cohere Transcribe",
+                    "S1-mini",
+                    "Superwhisper",
+                    "CrispASR",
+                    "Silero",
+                    "Whisper",
+                    "GGUF",
+                    "VAD",
+                ],
+                &[
+                    Term::heard("Lathe", &["Lata"]),
+                    Term::heard("graphify", &["Grappify"]),
+                ],
+            ),
         },
         Set {
             name: "dev".into(),
             enabled: true,
-            terms: strings(&[
-                "llama.cpp",
-                "whisper.cpp",
-                "ggml",
-                "Vulkan",
-                "CUDA",
-                "ROCm",
-                "Tauri",
-                "Svelte",
-                "SvelteKit",
-                "Vite",
-                "Rust",
-                "cargo",
-                "clippy",
-                "MSVC",
-                "CMake",
-                "Ninja",
-                "komorebi",
-                "WASAPI",
-                "cpal",
-                "npm",
-                "TOML",
-                "JSON",
-                "SQLite",
-                "PostgreSQL",
-                "Kubernetes",
-                "Docker",
-                "regex",
-                "async",
-                "stdout",
-                "stderr",
-                "repo",
-                "commit",
-                "branch",
-                "rebase",
-                "refactor",
-                "linter",
-                "GitHub",
-                "Levenshtein",
-                "Metaphone",
-                "quantization",
-                "inference",
-                "latency",
-                "throughput",
-                "Anthropic",
-                "Claude",
-                "OpenAI",
-                "HuggingFace",
-            ]),
+            terms: strings(
+                &[
+                    "llama.cpp",
+                    "whisper.cpp",
+                    "ggml",
+                    "Vulkan",
+                    "CUDA",
+                    "ROCm",
+                    "Tauri",
+                    "Svelte",
+                    "SvelteKit",
+                    "Vite",
+                    "Rust",
+                    "cargo",
+                    "clippy",
+                    "MSVC",
+                    "CMake",
+                    "Ninja",
+                    "komorebi",
+                    "WASAPI",
+                    "cpal",
+                    "npm",
+                    "TOML",
+                    "JSON",
+                    "SQLite",
+                    "PostgreSQL",
+                    "Kubernetes",
+                    "Docker",
+                    "regex",
+                    "async",
+                    "stdout",
+                    "stderr",
+                    "repo",
+                    "commit",
+                    "branch",
+                    "rebase",
+                    "refactor",
+                    "linter",
+                    "GitHub",
+                    "Levenshtein",
+                    "Metaphone",
+                    "quantization",
+                    "inference",
+                    "latency",
+                    "throughput",
+                    "Anthropic",
+                    "Claude",
+                    "Sonnet",
+                    "Opus",
+                    "Codex",
+                    "OpenAI",
+                    "HuggingFace",
+                ],
+                &[Term::heard("DeepSeek", &["DeepSeq"])],
+            ),
         },
     ]
 }
@@ -576,6 +596,15 @@ mod tests {
         let (out, n) = vocab().correct("that was a coherent argument");
         assert_eq!(out, "that was a coherent argument");
         assert_eq!(n, 0);
+    }
+
+    /// The shipped spoken forms: mishearings from real dictations that the phonetic net
+    /// rejects, so a fresh install corrects them without the user finding them first.
+    #[test]
+    fn corrects_the_shipped_mishearings() {
+        let (out, n) = vocab().correct("the Lata app runs grappify and DeepSeq");
+        assert_eq!(out, "the Lathe app runs graphify and DeepSeek");
+        assert_eq!(n, 3);
     }
 
     #[test]

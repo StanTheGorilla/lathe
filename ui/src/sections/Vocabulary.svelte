@@ -1,11 +1,47 @@
 <script>
   import { onMount } from "svelte";
-  import { modelStatus } from "../api.js";
+  import { defaultVocabularySets, modelStatus } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
   let index = $state(0);
   const set = $derived(config.vocabulary.sets[index]);
+
+  // The core writes a term with no spoken forms as a bare string, so the list arrives
+  // in two shapes. Make them one before anything reads `.write`; the file reads back
+  // either, so nothing is marked dirty for it.
+  $effect.pre(() => {
+    for (const s of config.vocabulary.sets) {
+      if (s.terms.some((t) => typeof t === "string")) {
+        s.terms = s.terms.map((t) => (typeof t === "string" ? { write: t, heard: [] } : t));
+      }
+    }
+  });
+
+  // A set is read-only until Edit is pressed, so a stray keystroke cannot change a
+  // list that is mostly looked at. Switching sets locks again.
+  let editing = $state(false);
+  let lockedIndex = $state(-1);
+  $effect(() => {
+    if (lockedIndex !== index) {
+      editing = false;
+      lockedIndex = index;
+    }
+  });
+
+  // The sets a fresh install starts with, from the core. A set with the same name can
+  // be put back to that list.
+  let shipped = $state([]);
+  onMount(async () => {
+    try {
+      shipped = await defaultVocabularySets();
+    } catch {
+      shipped = [];
+    }
+  });
+  const shippedFor = $derived(
+    set && shipped.find((s) => s.name.toLowerCase() === set.name.toLowerCase()),
+  );
 
   // Whether pass 1 does anything on the speech model in use. Most backends accept the
   // biasing call and drop it silently, so the answer has to come from the core.
@@ -21,48 +57,46 @@
     }
   });
 
-  // One term per line. A term that is reliably misheard names the words it is heard as,
-  // after an arrow: `Claude <- cloud, klaud`. Everything else stays a bare word.
-  const toText = (terms) =>
-    (terms ?? [])
-      .map((t) => (t.heard?.length ? `${t.write} <- ${t.heard.join(", ")}` : t.write))
-      .join("\n");
-
-  const fromText = (text) =>
+  const heardText = (term) => (term.heard ?? []).join(", ");
+  const parseHeard = (text) =>
     text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const i = line.indexOf("<-");
-        if (i === -1) return { write: line, heard: [] };
-        return {
-          write: line.slice(0, i).trim(),
-          heard: line
-            .slice(i + 2)
-            .split(",")
-            .map((h) => h.trim())
-            .filter(Boolean),
-        };
-      })
-      .filter((t) => t.write);
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
 
-  // The textarea is always editable and bound to a draft, resynced whenever the selected
-  // set changes. An earlier version rendered a read-only textarea from the terms
-  // directly and showed nothing at all: `value` on a textarea, and a text child, are
-  // both unreliable ways to populate one.
-  let draft = $state("");
-  let loadedIndex = $state(-1);
+  // Cells commit on change, not on every keystroke: "Lata," would otherwise be parsed
+  // and written back as "Lata" while the comma was still being typed.
+  function setWord(i, value) {
+    const write = value.trim();
+    if (!write) return removeTerm(i);
+    config.vocabulary.sets[index].terms[i].write = write;
+    onchange();
+  }
 
-  $effect(() => {
-    if (loadedIndex !== index && set) {
-      draft = toText(set.terms);
-      loadedIndex = index;
-    }
-  });
+  function setHeard(i, value) {
+    config.vocabulary.sets[index].terms[i].heard = parseHeard(value);
+    onchange();
+  }
 
-  function commit() {
-    config.vocabulary.sets[index].terms = fromText(draft);
+  function removeTerm(i) {
+    config.vocabulary.sets[index].terms = set.terms.filter((_, j) => j !== i);
+    onchange();
+  }
+
+  let newWord = $state("");
+  let newHeard = $state("");
+  let newWordInput = $state(null);
+
+  function addTerm() {
+    const write = newWord.trim();
+    if (!write) return;
+    config.vocabulary.sets[index].terms = [
+      ...set.terms,
+      { write, heard: parseHeard(newHeard) },
+    ];
+    newWord = "";
+    newHeard = "";
+    newWordInput?.focus();
     onchange();
   }
 
@@ -73,6 +107,14 @@
       { name, enabled: true, terms: [] },
     ];
     index = config.vocabulary.sets.length - 1;
+    // An empty set is there to be typed into.
+    lockedIndex = index;
+    editing = true;
+    onchange();
+  }
+
+  function restoreShipped() {
+    config.vocabulary.sets[index].terms = $state.snapshot(shippedFor.terms);
     onchange();
   }
 
@@ -89,92 +131,151 @@
 
 <h1>Vocabulary</h1>
 <p class="subtitle">
-  Words you want spelled correctly. Add the word; that is all. If one is reliably heard
-  as a different word, you can say so &mdash; see below.
+  Words the recogniser should spell your way: names, products, jargon. Add the word. If
+  one keeps coming out as something else, add what it is heard as and it is put right.
 </p>
 
 {#if biases === false}
-  <div class="status bad">
-    The <span class="mono">{backend}</span> speech model does not support recogniser
-    biasing, so words added here are <strong>not</strong> pushed into the recogniser
-    before it decides. They are applied afterwards, by the repair pass, which is strict
-    and cannot reach every word on its own.
-  </div>
-{:else if biases === true}
   <div class="status info">
-    Words here are pushed into the <span class="mono">{backend}</span> recogniser before
-    it decides anything, which is where almost all of the benefit is.
+    The <span class="mono">{backend}</span> speech model cannot be given these words up
+    front. They are corrected after recognition instead, which catches near misses and
+    anything listed under &ldquo;Also heard as&rdquo;.
   </div>
 {/if}
 
-<div class="status info">
-  A bare word can never replace something you actually said. Matching needs an exact
-  phonetic match, so adding &ldquo;Cohere&rdquo; will not touch &ldquo;coherent&rdquo; --
-  they sound different. A word after an arrow is the deliberate exception:
-  <span class="mono">Claude &lt;- cloud</span> means you cannot dictate the word
-  &ldquo;cloud&rdquo; while this set is on. For an unconditional substitution that
-  ignores the vocabulary entirely, use Replacements on a preset.
+<h2>Sets</h2>
+
+<div class="preset-tabs">
+  {#each config.vocabulary.sets as s, i}
+    <button aria-pressed={index === i} onclick={() => (index = i)}>
+      {s.name} <span class="count">{s.terms.length}</span>{s.enabled ? "" : " · off"}
+    </button>
+  {/each}
+  <button onclick={addSet}>+ New set</button>
 </div>
 
-{#if config.vocabulary.sets.length}
-  <div class="preset-tabs">
-    {#each config.vocabulary.sets as s, i}
-      <button aria-pressed={index === i} onclick={() => (index = i)}>
-        {s.name}{s.enabled ? "" : " (off)"}
-      </button>
-    {/each}
-    <button onclick={addSet}>+ New set</button>
-  </div>
-{/if}
-
 {#if set}
-  <div class="field">
-    <label for="setname">Set name</label>
+  <div class="set-bar">
     <input
-      id="setname"
-      class="mono"
+      class="mono set-name"
       type="text"
+      aria-label="Set name"
       value={set.name}
+      disabled={!editing}
       oninput={(e) => { config.vocabulary.sets[index].name = e.currentTarget.value; onchange(); }}
     />
-    <p class="hint">
-      Presets choose sets by name, so technical terms and personal names need not
-      contaminate each other.
-    </p>
-  </div>
-
-  <label class="check">
-    <input
-      type="checkbox"
-      checked={set.enabled}
-      onchange={(e) => { config.vocabulary.sets[index].enabled = e.currentTarget.checked; onchange(); }}
-    />
-    <span>Use this set</span>
-  </label>
-
-  <div class="field" style="max-width:100%">
-    <label for="entries">Words ({set.terms.length})</label>
-    <textarea id="entries" bind:value={draft} onchange={commit} onblur={commit}></textarea>
-    <div class="row" style="margin-top:8px">
+    <label class="check" style="margin:0">
+      <input
+        type="checkbox"
+        checked={set.enabled}
+        onchange={(e) => { config.vocabulary.sets[index].enabled = e.currentTarget.checked; onchange(); }}
+      />
+      <span>Use this set</span>
+    </label>
+    <span class="spacer"></span>
+    <button aria-pressed={editing} onclick={() => (editing = !editing)}>
+      {editing ? "Done" : "Edit"}
+    </button>
+    {#if editing && shippedFor}
+      <button onclick={restoreShipped}>Restore shipped words</button>
+    {/if}
+    {#if editing}
       <button onclick={removeSet} disabled={config.vocabulary.sets.length <= 1}>
         Delete this set
       </button>
-    </div>
-    <p class="hint">
-      One per line. Names, jargon, product names, anything the recogniser has not met.
-      Phrases are fine and help recognition, though only single words are repaired
-      afterwards.
-    </p>
-    <p class="hint">
-      For a word that keeps coming out wrong, write
-      <span class="mono">Claude &lt;- cloud, klaud</span> &mdash; the word on the left is
-      written whenever you say one of the words on the right. Use it only where the
-      recogniser is reliably wrong: each one costs you that word.
-    </p>
+    {/if}
   </div>
+
+  {#if editing && shippedFor}
+    <p class="hint" style="margin:-8px 0 12px">
+      Restoring puts back the {shippedFor.terms.length} words this version of the app
+      ships for &ldquo;{shippedFor.name}&rdquo; and drops anything you added. Revert at
+      the bottom undoes it until you save.
+    </p>
+  {/if}
+
+  <table class="terms" class:editing>
+    <thead>
+      <tr>
+        <th>Word</th>
+        <th>Also heard as</th>
+        {#if editing}<th></th>{/if}
+      </tr>
+    </thead>
+    <tbody>
+      {#each set.terms as term, i (i)}
+        <tr>
+          {#if editing}
+            <td>
+              <input
+                type="text"
+                class="mono"
+                value={term.write}
+                onchange={(e) => setWord(i, e.currentTarget.value)}
+              />
+            </td>
+            <td>
+              <input
+                type="text"
+                class="mono"
+                value={heardText(term)}
+                placeholder="none"
+                onchange={(e) => setHeard(i, e.currentTarget.value)}
+              />
+            </td>
+            <td class="actions">
+              <button class="quiet" onclick={() => removeTerm(i)}>Remove</button>
+            </td>
+          {:else}
+            <td class="mono">{term.write}</td>
+            <td class="mono">
+              {#if term.heard?.length}{heardText(term)}{:else}<span class="dim">&ndash;</span>{/if}
+            </td>
+          {/if}
+        </tr>
+      {/each}
+      {#if editing}
+        <tr class="add">
+          <td>
+            <input
+              type="text"
+              class="mono"
+              placeholder="New word"
+              bind:this={newWordInput}
+              bind:value={newWord}
+              onkeydown={(e) => { if (e.key === "Enter") addTerm(); }}
+            />
+          </td>
+          <td>
+            <input
+              type="text"
+              class="mono"
+              placeholder="heard as, comma separated"
+              bind:value={newHeard}
+              onkeydown={(e) => { if (e.key === "Enter") addTerm(); }}
+            />
+          </td>
+          <td class="actions">
+            <button class="primary" onclick={addTerm} disabled={!newWord.trim()}>Add</button>
+          </td>
+        </tr>
+      {/if}
+      {#if !set.terms.length && !editing}
+        <tr><td colspan="2" class="dim">No words yet. Press Edit to add some.</td></tr>
+      {/if}
+    </tbody>
+  </table>
+
+  <p class="hint">
+    A word on its own is only ever swapped in for something that sounds the same, so
+    &ldquo;Cohere&rdquo; never touches &ldquo;coherent&rdquo;. &ldquo;Also heard as&rdquo;
+    is the deliberate exception: if Claude is heard as <span class="mono">cloud</span>,
+    every &ldquo;cloud&rdquo; becomes Claude while this set is on, so list only words you
+    never mean literally. Phrases are fine as words; only single words are corrected.
+  </p>
 {/if}
 
-<h2>Matching</h2>
+<h2>Advanced</h2>
 
 <label class="check">
   <input
@@ -185,7 +286,8 @@
   <span>
     Correct the transcript after recognition
     <span class="hint" style="margin:0">
-      When off, terms still bias recognition but nothing is rewritten afterwards.
+      When off, nothing is rewritten afterwards; the words still bias recognition on
+      models that support it.
     </span>
   </span>
 </label>
@@ -221,8 +323,80 @@
     oninput={(e) => { config.vocabulary.hotword_boost = +e.currentTarget.value; onchange(); }}
   />
   <p class="hint">
-    How hard to push the recogniser toward these terms. Too high and it hears them where
-    they were not said. {count} term{count === 1 ? "" : "s"} are active; the first 128 are
-    sent.
+    How hard to push the recogniser toward these words, where the model allows it. Too
+    high and it hears them where they were not said. {count} word{count === 1 ? "" : "s"}
+    active; the first 128 are sent.
   </p>
 </div>
+
+<style>
+  .count {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-left: 4px;
+  }
+
+  .set-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 640px;
+    margin-bottom: 14px;
+  }
+
+  .terms input {
+    font-family: var(--font-mono);
+  }
+
+  .set-name {
+    width: 180px;
+  }
+
+  .spacer {
+    flex: 1;
+  }
+
+  .terms {
+    max-width: 640px;
+    margin-bottom: 8px;
+  }
+
+  .terms th:first-child,
+  .terms td:first-child {
+    width: 40%;
+  }
+
+  .terms td {
+    vertical-align: middle;
+  }
+
+  .terms.editing td {
+    padding: 4px 8px 4px 0;
+    border-bottom: 0;
+  }
+
+  .terms .actions {
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  .terms tr.add td {
+    padding-top: 10px;
+  }
+
+  .quiet {
+    padding: 4px 8px;
+    background: none;
+    border-color: transparent;
+    color: var(--text-dim);
+  }
+
+  .quiet:hover:not(:disabled) {
+    color: var(--clay);
+    border-color: transparent;
+  }
+
+  .dim {
+    color: var(--text-dim);
+  }
+</style>

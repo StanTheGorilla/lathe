@@ -36,6 +36,13 @@ pub fn config_path(state: State<'_, AppState>) -> Reply<String> {
     Ok(state.config_path.display().to_string())
 }
 
+/// The vocabulary sets a fresh config starts with, so the settings window can offer to
+/// restore one without carrying its own copy of the list.
+#[tauri::command]
+pub fn default_vocabulary_sets() -> Vec<lathe_core::vocabulary::Set> {
+    lathe_core::vocabulary::Vocabulary::default().sets
+}
+
 #[derive(Serialize)]
 pub struct Adapter {
     id: i32,
