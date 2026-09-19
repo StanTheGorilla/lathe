@@ -722,17 +722,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cohere-probe"
-version = "0.1.9"
-dependencies = [
- "anyhow",
- "clap",
- "crispasr",
- "hound",
- "llama-cpp-2",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2565,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "lathe"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "lathe-core",
@@ -2583,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2604,6 +2593,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "strsim",
  "toml 1.1.5+spec-1.1.0",
  "ureq",
@@ -2612,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-spike"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "clap",
