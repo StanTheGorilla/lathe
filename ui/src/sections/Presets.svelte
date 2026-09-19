@@ -50,6 +50,59 @@
     onchange();
   }
 
+  // Brief 5.3: presets are editable and clonable. A new one starts from the shipped
+  // Prompt defaults; a clone copies everything but the hotkey, which can only be held
+  // by one preset at a time.
+  function unusedName(base) {
+    let name = base;
+    for (let n = 2; config.presets.some((p) => p.name === name); n++) name = `${base} ${n}`;
+    return name;
+  }
+
+  function addPreset(from) {
+    const fresh = from
+      ? { ...$state.snapshot(from), name: unusedName(`${from.name} copy`), hotkey: null }
+      : {
+          name: unusedName("New preset"),
+          styling: "semi-formal",
+          structure: "prose",
+          context: "general",
+          cleanup: true,
+          auto_paste: true,
+          vocabulary_sets: [],
+          replacements: [],
+          hotkey: null,
+          rewrite: "off",
+        };
+    config.presets = [...config.presets, fresh];
+    index = config.presets.length - 1;
+    onchange();
+  }
+
+  function rename(name) {
+    const was = preset.name;
+    config.presets[index].name = name;
+    // The tray selection follows the preset it named, not the name.
+    if (config.active_preset === was) config.active_preset = name;
+    onchange();
+  }
+
+  function removePreset() {
+    const was = preset.name;
+    config.presets = config.presets.filter((_, i) => i !== index);
+    index = Math.max(0, index - 1);
+    if (config.active_preset === was) config.active_preset = config.presets[index].name;
+    onchange();
+  }
+
+  const nameClash = $derived(
+    !preset.name.trim()
+      ? "A preset needs a name."
+      : config.presets.some((p, i) => i !== index && p.name === preset.name)
+        ? "Another preset already has this name; the tray and hotkeys go by name."
+        : "",
+  );
+
   function setLanguage(field, value) {
     config.languages[field] = value;
     // The active one must be one of the two; follow the field that was edited if it was
@@ -140,7 +193,27 @@
   {#each config.presets as p, i}
     <button aria-pressed={index === i} onclick={() => (index = i)}>{p.name}</button>
   {/each}
+  <button onclick={() => addPreset(null)}>+ New preset</button>
 </div>
+
+<div class="set-bar">
+  <input
+    class="mono set-name"
+    type="text"
+    aria-label="Preset name"
+    value={preset.name}
+    oninput={(e) => rename(e.currentTarget.value)}
+  />
+  <span class="spacer"></span>
+  <button onclick={() => addPreset(preset)}>Clone</button>
+  <button onclick={removePreset} disabled={config.presets.length <= 1}>
+    Delete this preset
+  </button>
+</div>
+
+{#if nameClash}
+  <div class="status bad">{nameClash}</div>
+{/if}
 
 {#if preset.name === "Prompt" && preset.rewrite === "off"}
   <div class="status info">
@@ -308,3 +381,21 @@
     >{rulesText(preset.replacements)}</textarea
   >
 </div>
+
+<style>
+  .set-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 640px;
+    margin-bottom: 14px;
+  }
+
+  .set-name {
+    width: 180px;
+  }
+
+  .spacer {
+    flex: 1;
+  }
+</style>
