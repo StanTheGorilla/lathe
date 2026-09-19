@@ -582,6 +582,19 @@ pub fn open_release_page(url: String) -> Reply<()> {
     Ok(())
 }
 
+/// The About screen's "Update now": fetches the installer in the background. Progress
+/// comes back through `update_status`.
+#[tauri::command]
+pub fn download_update(app: tauri::AppHandle) -> Reply<()> {
+    crate::update::start_download(&app)
+}
+
+/// "Restart to update": runs the downloaded installer and quits.
+#[tauri::command]
+pub fn install_update(app: tauri::AppHandle) -> Reply<()> {
+    crate::update::install(&app)
+}
+
 /// What the platform still needs from the user before dictation can work: the
 /// Accessibility permission on macOS, the input group and the udev rule on Linux.
 /// Empty on Windows and on a machine that is set up.

@@ -22,9 +22,101 @@ pub struct Status {
     /// The last check's failure, if it failed. Offline is the common case and is not
     /// worth a notification, but the screen should be able to say so.
     pub error: Option<String>,
+    /// The installer download, once "Update" has been pressed.
+    pub download: Option<Download>,
+}
+
+/// Where the installer download has got to. `path` is set once the file is on disk
+/// and verified, which is when the About screen offers to restart.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct Download {
+    pub version: String,
+    pub done: u64,
+    pub total: u64,
+    pub path: Option<String>,
+    pub error: Option<String>,
 }
 
 pub type Shared = Arc<Mutex<Status>>;
+
+/// Fetches the installer for the available release on a background thread. Progress
+/// lands in `Status::download` for the About screen to poll. A second call while one
+/// is running, or after one finished, does nothing.
+pub fn start_download(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut status = state.update.lock().unwrap();
+    let available = status
+        .available
+        .clone()
+        .ok_or("no newer release is known")?;
+    if available.installer.is_none() {
+        return Err("this release has no installer Lathe can run; use the download page".into());
+    }
+    if let Some(d) = &status.download {
+        if d.version == available.version && d.error.is_none() {
+            return Ok(());
+        }
+    }
+    status.download = Some(Download {
+        version: available.version.clone(),
+        ..Default::default()
+    });
+    drop(status);
+
+    let shared = Arc::clone(&state.update);
+    std::thread::spawn(move || {
+        let dir = std::env::temp_dir().join("lathe-update");
+        let result = lathe_core::update::download_installer(
+            &available,
+            &dir,
+            |done, total| {
+                if let Some(d) = shared.lock().unwrap().download.as_mut() {
+                    d.done = done;
+                    d.total = total;
+                }
+            },
+            &|| false,
+        );
+        if let Some(d) = shared.lock().unwrap().download.as_mut() {
+            match result {
+                Ok(path) => {
+                    eprintln!("update: {} downloaded to {}", available.version, path.display());
+                    d.path = Some(path.display().to_string());
+                }
+                Err(e) => {
+                    eprintln!("update download failed: {e:#}");
+                    d.error = Some(format!("{e:#}"));
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Runs the downloaded installer and quits. The NSIS installer's passive mode shows
+/// only a progress bar, closes a running Lathe itself, and `/R` starts the new one
+/// when it is done; `/UPDATE` keeps it from touching shortcuts or the WebView2 setup.
+pub fn install(app: &AppHandle) -> Result<(), String> {
+    let path = app
+        .state::<AppState>()
+        .update
+        .lock()
+        .unwrap()
+        .download
+        .as_ref()
+        .and_then(|d| d.path.clone())
+        .ok_or("the installer has not been downloaded")?;
+    if !cfg!(windows) {
+        return Err("installing from inside the app is only wired up on Windows".into());
+    }
+    eprintln!("update: running {path} and exiting");
+    std::process::Command::new(&path)
+        .args(["/P", "/R", "/UPDATE"])
+        .spawn()
+        .map_err(|e| format!("could not start the installer: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
 
 pub fn shared() -> Shared {
     Arc::new(Mutex::new(Status {
@@ -53,7 +145,7 @@ pub fn check_now(app: &AppHandle) -> Status {
                 eprintln!("update: Lathe {version} is available");
                 notify_user(
                     &format!("Lathe {version} is available"),
-                    "Open the tray menu or the About screen to get it.",
+                    "Pick it from the tray menu to update.",
                 );
                 drop(status);
                 refresh_tray(app);

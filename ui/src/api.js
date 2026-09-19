@@ -32,5 +32,7 @@ export const setModelsDir = (dir, moveExisting) =>
 export const updateStatus = () => invoke("update_status");
 export const checkForUpdates = () => invoke("check_for_updates");
 export const openReleasePage = (url) => invoke("open_release_page", { url });
+export const downloadUpdate = () => invoke("download_update");
+export const installUpdate = () => invoke("install_update");
 export const setupStatus = () => invoke("setup_status");
 export const takeSection = () => invoke("take_section");

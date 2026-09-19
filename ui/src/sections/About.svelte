@@ -1,6 +1,12 @@
 <script>
   import { onMount } from "svelte";
-  import { updateStatus, checkForUpdates, openReleasePage } from "../api.js";
+  import {
+    updateStatus,
+    checkForUpdates,
+    openReleasePage,
+    downloadUpdate,
+    installUpdate,
+  } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
@@ -9,14 +15,48 @@
   // with the automatic check switched off.
   let update = $state({ current: "", checked: false, available: null, error: null });
   let checking = $state(false);
+  let installError = $state("");
+  let poll = null;
 
-  onMount(async () => {
-    try {
-      update = await updateStatus();
-    } catch {
-      /* the version line stays empty */
-    }
+  onMount(() => {
+    (async () => {
+      try {
+        update = await updateStatus();
+      } catch {
+        /* the version line stays empty */
+      }
+    })();
+    // The installer download runs in the core; this just watches it. Cheap enough
+    // to poll whether or not one is running, and the tray can start one at any time.
+    poll = setInterval(async () => {
+      try {
+        update = await updateStatus();
+      } catch {
+        /* keep what we had */
+      }
+    }, 500);
+    return () => clearInterval(poll);
   });
+
+  async function startUpdate() {
+    installError = "";
+    try {
+      await downloadUpdate();
+    } catch (e) {
+      installError = String(e);
+    }
+  }
+
+  async function restart() {
+    installError = "";
+    try {
+      await installUpdate();
+    } catch (e) {
+      installError = String(e);
+    }
+  }
+
+  const mb = (n) => (n / 1048576).toFixed(0);
 
   async function checkNow() {
     checking = true;
@@ -76,14 +116,42 @@
 
 <h2>Version</h2>
 {#if update.available}
+  {@const download = update.download}
   <div class="status ok">
     <strong>Lathe {update.available.version} is available.</strong> You have
-    {update.current}. The installers are on the release page.
+    {update.current}.
+    {#if !update.available.installer}
+      The installers are on the release page.
+    {:else if download?.path}
+      Downloaded and checked. Restarting closes Lathe, installs the new version and
+      starts it again; a settings window does not come back by itself.
+    {:else if download && !download.error}
+      Downloading the installer
+      {#if download.total > 0}
+        &mdash; {mb(download.done)} of {mb(download.total)} MB
+      {/if}
+    {:else}
+      Update downloads the installer here and restarts Lathe into the new version.
+    {/if}
     <p style="margin:8px 0 0">
-      <button class="primary" onclick={() => openReleasePage(update.available.url)}>
-        Open the download page
-      </button>
+      {#if !update.available.installer}
+        <button class="primary" onclick={() => openReleasePage(update.available.url)}>
+          Open the download page
+        </button>
+      {:else if download?.path}
+        <button class="primary" onclick={restart}>Restart to update</button>
+      {:else if download && !download.error}
+        <progress max={download.total || 1} value={download.done}></progress>
+      {:else}
+        <button class="primary" onclick={startUpdate}>
+          {download?.error ? "Try again" : `Update to ${update.available.version}`}
+        </button>
+        <button onclick={() => openReleasePage(update.available.url)}>Release page</button>
+      {/if}
     </p>
+    {#if download?.error || installError}
+      <p class="hint" style="margin:6px 0 0">{download?.error || installError}</p>
+    {/if}
   </div>
 {/if}
 <div class="field">
@@ -110,9 +178,9 @@
   <span>
     Check for a new version once a day
     <span class="hint" style="margin:0">
-      One anonymous request to GitHub's releases list. Nothing is downloaded and nothing
-      about this machine is sent. When there is a newer version, a notification says so
-      and the tray menu gets an item to open it.
+      One anonymous request to GitHub's releases list. Nothing is downloaded until you
+      press Update, and nothing about this machine is sent. When there is a newer
+      version, a notification says so and the tray menu gets an item for it.
     </span>
   </span>
 </label>

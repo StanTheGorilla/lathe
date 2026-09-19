@@ -336,6 +336,8 @@ fn run(args: &[String]) -> Result<()> {
             commands::update_status,
             commands::check_for_updates,
             commands::open_release_page,
+            commands::download_update,
+            commands::install_update,
             commands::setup_status,
             commands::take_section,
         ])
@@ -546,12 +548,11 @@ fn build_tray(app: &AppHandle, config: &Config, bindings: &Bindings) -> Result<(
             } else if id == "settings" {
                 open_settings(app);
             } else if id == "update" {
-                let url = app
-                    .try_state::<AppState>()
-                    .and_then(|s| s.update.lock().unwrap().available.clone())
-                    .map(|a| a.url);
-                if let Some(url) = url {
-                    update::open_release_page(&url);
+                // The About screen does the download and the restart; the tray item
+                // just gets the user there and starts it.
+                open_settings_at(app, "about");
+                if let Err(e) = update::start_download(app) {
+                    eprintln!("update: {e}");
                 }
             } else if let Some(code) = id.strip_prefix("language:") {
                 persist(app, &format!("language: {}", language_name(code)), |c| {
