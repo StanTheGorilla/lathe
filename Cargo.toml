@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/spike", "crates/lathe", "crates/cohere-probe"]
+members = ["crates/core", "crates/spike", "crates/lathe"]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 

@@ -1,0 +1,24 @@
+name: Check
+
+# The cheap check that runs on every push. The native stacks take close to an hour
+# across the three platforms (build.yml), so nothing there runs on push; this builds the
+# settings window alone, which is a minute and catches a broken commit in ui/.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
