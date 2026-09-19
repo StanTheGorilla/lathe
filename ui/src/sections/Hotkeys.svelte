@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { autostartEnabled, setAutostart, lastHotkey, platform, setupStatus } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
@@ -16,7 +17,16 @@
   // on Linux. Read once: fixing either means a restart or a new login anyway.
   let problems = $state([]);
 
+  // WebView2 does not blur the focused element when another window comes to the front,
+  // so a capture field left open kept saying "Press a combination" while the keys went
+  // elsewhere. The window itself knows; close the capture on its blur.
+  let unlistenBlur = null;
+
   onMount(async () => {
+    unlistenBlur = listen("tauri://blur", () => {
+      capturing = null;
+      document.activeElement?.blur();
+    });
     try {
       os = await platform();
     } catch {
@@ -44,6 +54,7 @@
 
   onDestroy(() => {
     if (seenTimer) clearInterval(seenTimer);
+    unlistenBlur?.then((f) => f());
   });
 
   async function toggleAutostart(on) {

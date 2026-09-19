@@ -118,8 +118,9 @@ body {
   flex: 1;
 }
 
+/* Under the section names, not the icons: it is a caption, not an eighth section. */
 .rail-foot {
-  padding: 0 20px;
+  padding: 0 20px 0 46px;
   color: var(--text-dim);
   font-size: 11px;
 }
@@ -376,7 +377,7 @@ th {
 /* Brief 5.7: the level meter is the only acceptable real-time visual, and it exists
    only here in settings. */
 .meter {
-  height: 6px;
+  height: 10px;
   border-radius: 2px;
   background: var(--surface-sunken);
   border: 1px solid var(--border);
