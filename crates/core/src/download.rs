@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, Context as _, Result};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -154,6 +155,10 @@ pub fn known(file: &str) -> Option<&'static Known> {
 /// Writes to a `.part` file and renames on success, so an interrupted download can never
 /// be mistaken for a complete model. A half-written GGUF would fail at load with a
 /// confusing parse error rather than an obvious "not downloaded".
+///
+/// A `.part` left by a dropped or cancelled transfer is picked up where it stopped, with
+/// an HTTP range request; a server that ignores the range starts it over. The finished
+/// file is checked against the SHA-256 Hugging Face announces for it, when it does.
 pub fn fetch(
     entry: &Known,
     dir: &Path,
@@ -176,30 +181,65 @@ pub fn fetch(
         .build()
         .new_agent();
 
-    let mut response = agent
-        .get(entry.url)
+    // The hash lives on the redirect Hugging Face answers with, not on the file server
+    // it points to, so ask without following it. Not fatal when absent: a host that
+    // does not announce one simply goes unverified.
+    let expected = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .max_redirects(0)
+        .build()
+        .new_agent()
+        .head(entry.url)
         .call()
-        .map_err(|e| anyhow!("could not start the download: {e}"))?;
+        .ok()
+        .and_then(|r| announced_sha256(r.headers()));
 
-    let total = response
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(entry.approx_bytes);
+    let have = std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
+    let mut request = agent.get(entry.url);
+    if have > 0 {
+        request = request.header("Range", format!("bytes={have}-"));
+    }
+    let mut response = match request.call() {
+        Ok(r) => r,
+        // Past the end: the part is at least as long as the file, so it is not one.
+        Err(ureq::Error::StatusCode(416)) => {
+            let _ = std::fs::remove_file(&part_path);
+            return fetch(entry, dir, progress, cancel);
+        }
+        Err(e) => return Err(anyhow!("could not start the download: {e}")),
+    };
+
+    let resumed = have > 0 && response.status() == 206;
+    let mut hasher = Sha256::new();
+    let mut file = if resumed {
+        // The hash has to cover what is already on disk, and reading it back is the
+        // only way to know those bytes are what was written.
+        hash_file(&part_path, &mut hasher)?;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&part_path)
+            .with_context(|| format!("reopening {}", part_path.display()))?
+    } else {
+        std::fs::File::create(&part_path)
+            .with_context(|| format!("creating {}", part_path.display()))?
+    };
+    let mut done = if resumed { have } else { 0 };
+
+    let total = done
+        + response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(entry.approx_bytes.saturating_sub(done));
     // The size is known before the first byte; say so rather than showing "0 of 0".
-    progress(0, total);
+    progress(done, total);
 
     let mut reader = response.body_mut().as_reader();
-    let mut file = std::fs::File::create(&part_path)
-        .with_context(|| format!("creating {}", part_path.display()))?;
-
     let mut buffer = vec![0u8; 1 << 20];
-    let mut done = 0u64;
     loop {
         if cancel() {
-            drop(file);
-            let _ = std::fs::remove_file(&part_path);
+            // The part stays: it is what the next attempt resumes from.
             return Err(anyhow!("download cancelled"));
         }
         let read = reader.read(&mut buffer).context("reading from the server")?;
@@ -208,6 +248,7 @@ pub fn fetch(
         }
         file.write_all(&buffer[..read])
             .with_context(|| format!("writing {}", part_path.display()))?;
+        hasher.update(&buffer[..read]);
         done += read as u64;
         progress(done, total);
     }
@@ -217,15 +258,46 @@ pub fn fetch(
 
     // A truncated transfer that ended cleanly still leaves a short file.
     if total > 0 && done < total {
-        let _ = std::fs::remove_file(&part_path);
         return Err(anyhow!(
-            "the download ended early: got {done} bytes of {total}"
+            "the download ended early: got {done} bytes of {total}; starting it again \
+             picks up from there"
         ));
+    }
+
+    if let Some(expected) = expected {
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(anyhow!(
+                "the download is corrupt: SHA-256 {actual} where {expected} was announced"
+            ));
+        }
     }
 
     std::fs::rename(&part_path, &final_path)
         .with_context(|| format!("moving into place: {}", final_path.display()))?;
     Ok(())
+}
+
+/// The SHA-256 Hugging Face announces for an LFS file, from the redirect it answers a
+/// resolve URL with. Lower-case hex, or `None` when the header is absent or not a hash.
+fn announced_sha256(headers: &ureq::http::HeaderMap) -> Option<String> {
+    let value = headers.get("x-linked-etag")?.to_str().ok()?;
+    let hash = value.trim().trim_matches('"').to_ascii_lowercase();
+    (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
+}
+
+fn hash_file(path: &Path, hasher: &mut Sha256) -> Result<()> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading back {}", path.display()))?;
+    let mut buffer = vec![0u8; 4 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        hasher.update(&buffer[..read]);
+    }
 }
 
 /// The known model files sitting in `dir`, with their sizes.
@@ -369,6 +441,141 @@ mod tests {
         || false
     }
 
+    /// A one-file Hugging Face stand-in on a local port: HEAD gets the redirect with
+    /// the announced hash, GET gets the bytes, honouring a range when `ranges` is set.
+    /// Serves `requests` connections, then goes away.
+    fn serve(body: Vec<u8>, sha: &str, ranges: bool, requests: usize) -> String {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let sha = sha.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let mut stream = stream.unwrap();
+                let mut head = false;
+                let mut from = None;
+                for line in BufReader::new(stream.try_clone().unwrap()).lines() {
+                    let line = line.unwrap();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if line.starts_with("HEAD ") {
+                        head = true;
+                    }
+                    // Header names arrive lower-case; the http crate normalises them.
+                    if let Some(range) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        from = range.trim_end_matches('-').parse::<usize>().ok();
+                    }
+                }
+                let reply = if head {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: /cdn\r\nX-Linked-ETag: \"{sha}\"\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .into_bytes()
+                } else {
+                    let (status, slice, extra) = match from.filter(|_| ranges) {
+                        Some(n) => (
+                            "206 Partial Content",
+                            &body[n..],
+                            format!("Content-Range: bytes {n}-{}/{}\r\n", body.len() - 1, body.len()),
+                        ),
+                        None => ("200 OK", &body[..], String::new()),
+                    };
+                    let mut reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+                        slice.len()
+                    )
+                    .into_bytes();
+                    reply.extend_from_slice(slice);
+                    reply
+                };
+                stream.write_all(&reply).unwrap();
+            }
+        });
+        url
+    }
+
+    fn entry(url: String, file: &'static str) -> Known {
+        Known {
+            file,
+            label: "",
+            role: "",
+            url: Box::leak(url.into_boxed_str()),
+            approx_bytes: 0,
+            required: false,
+        }
+    }
+
+    fn sha_of(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn resumes_a_part_and_verifies_the_whole() {
+        let dir = scratch("resume");
+        let body: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let url = serve(body.clone(), &sha_of(&body), true, 2);
+        // Half of it already on disk from an earlier attempt.
+        std::fs::write(dir.join("ANOTHER.part"), &body[..20_000]).unwrap();
+
+        let mut first = None;
+        fetch(
+            &entry(url, "ANOTHER"),
+            &dir,
+            |done, _| {
+                first.get_or_insert(done);
+            },
+            &never(),
+        )
+        .unwrap();
+        assert_eq!(first, Some(20_000), "progress starts where the part ended");
+        assert_eq!(std::fs::read(dir.join("ANOTHER")).unwrap(), body);
+        assert!(!dir.join("ANOTHER.part").exists());
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_range_starts_over() {
+        let dir = scratch("norange");
+        let body = vec![3u8; 10_000];
+        let url = serve(body.clone(), &sha_of(&body), false, 2);
+        std::fs::write(dir.join("f.part"), vec![9u8; 4_000]).unwrap();
+        fetch(&entry(url, "f"), &dir, |_, _| {}, &never()).unwrap();
+        assert_eq!(std::fs::read(dir.join("f")).unwrap(), body);
+    }
+
+    #[test]
+    fn a_corrupt_download_is_refused() {
+        let dir = scratch("corrupt");
+        let body = vec![1u8; 5_000];
+        let url = serve(body, &sha_of(b"something else"), true, 2);
+        let err = fetch(&entry(url, "g"), &dir, |_, _| {}, &never()).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "{err}");
+        assert!(!dir.join("g").exists());
+        assert!(!dir.join("g.part").exists());
+    }
+
+    #[test]
+    fn a_cancelled_download_keeps_its_part() {
+        let dir = scratch("cancel");
+        let body = vec![1u8; 5_000];
+        let url = serve(body, "not-a-hash", true, 2);
+        let err = fetch(&entry(url, "h"), &dir, |_, _| {}, &|| true).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+        assert!(dir.join("h.part").exists());
+    }
+
+    #[test]
+    fn only_a_real_hash_counts_as_announced() {
+        let mut headers = ureq::http::HeaderMap::new();
+        assert_eq!(announced_sha256(&headers), None);
+        headers.insert("x-linked-etag", "\"abc\"".parse().unwrap());
+        assert_eq!(announced_sha256(&headers), None);
+        let sha = sha_of(b"x");
+        headers.insert("x-linked-etag", format!("\"{}\"", sha.to_uppercase()).parse().unwrap());
+        assert_eq!(announced_sha256(&headers).as_deref(), Some(sha.as_str()));
+    }
+
     #[test]
     fn moves_known_files_and_leaves_nothing_behind() {
         let from = scratch("from");
@@ -471,38 +678,14 @@ mod tests {
     }
 
     /// Serves one fixed body over HTTP on a loopback port, once.
-    fn serve_once(body: Vec<u8>) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(head.as_bytes()).unwrap();
-            stream.write_all(&body).unwrap();
-        });
-        url
-    }
-
     #[test]
     fn the_size_is_reported_before_the_first_byte_and_the_file_lands() {
         let dir = scratch("fetch");
         let body = vec![9u8; 3000];
-        let entry: &'static Known = Box::leak(Box::new(Known {
-            file: "model.bin",
-            label: "",
-            role: "",
-            url: Box::leak(serve_once(body.clone()).into_boxed_str()),
-            approx_bytes: 1,
-            required: false,
-        }));
+        let entry = entry(serve(body.clone(), "", false, 2), "model.bin");
 
         let mut reports = Vec::new();
-        fetch(entry, &dir, |done, total| reports.push((done, total)), &never()).unwrap();
+        fetch(&entry, &dir, |done, total| reports.push((done, total)), &never()).unwrap();
 
         assert_eq!(reports.first(), Some(&(0, 3000)));
         assert_eq!(reports.last(), Some(&(3000, 3000)));

@@ -23,6 +23,9 @@ toml = "1"
 # Blocking HTTP for the external transcription endpoint (brief 4.3). Chosen over
 # reqwest because it needs no async runtime; roughly 1MB in the binary.
 ureq = { version = "3", features = ["json"] }
+# Verifies model downloads against the SHA-256 Hugging Face publishes for every file.
+# Already in the tree through Tauri, so it costs nothing new.
+sha2 = "0.10"
 
 # The GPU backend is chosen per platform: Vulkan everywhere it exists, Metal on macOS.
 # Every crate in the workspace must agree, because cargo unifies features per target
