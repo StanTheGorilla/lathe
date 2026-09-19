@@ -210,6 +210,7 @@ textarea {
 
 /* A locked field reads as text on the page; the sunken box means it can be typed in. */
 input[type="text"]:disabled,
+input[type="number"]:disabled,
 textarea:disabled {
   background: var(--surface);
   border-color: transparent;
@@ -353,6 +354,17 @@ td {
   text-align: left;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The first and last columns sit on the column's edges, like every label above them. */
+th:first-child,
+td:first-child {
+  padding-left: 0;
+}
+
+th:last-child,
+td:last-child {
+  padding-right: 0;
 }
 
 th {

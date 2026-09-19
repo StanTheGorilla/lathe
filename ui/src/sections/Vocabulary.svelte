@@ -318,6 +318,7 @@
     step="0.5"
     min="0"
     max="10"
+    disabled={biases === false}
     value={config.vocabulary.hotword_boost}
     oninput={(e) => { config.vocabulary.hotword_boost = +e.currentTarget.value; onchange(); }}
   />

@@ -94,7 +94,7 @@
   }
 </script>
 
-<h1>Hotkeys</h1>
+<h1 style="margin-bottom:16px">Hotkeys</h1>
 
 {#each problems as p}
   <div class="status bad">
@@ -102,11 +102,6 @@
     <p style="margin:6px 0 0" class="mono">{p.fix}</p>
   </div>
 {/each}
-
-<p class="subtitle">
-  One binding does both styles. A tap shorter than the threshold latches recording on
-  until you tap again; holding it longer records only while held.
-</p>
 
 <div class="status info">
   <strong>Press a Lathe hotkey now.</strong> Whatever it receives appears here, so you can
