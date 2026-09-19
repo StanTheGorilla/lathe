@@ -16,6 +16,7 @@ export const historyRecent = (search, limit) => invoke("history_recent", { searc
 export const historyStats = () => invoke("history_stats");
 export const historyWipe = () => invoke("history_wipe");
 export const historyPaste = (id, raw) => invoke("history_paste", { id, raw });
+export const historyCorrect = (id, cleaned) => invoke("history_correct", { id, cleaned });
 export const autostartEnabled = () => invoke("autostart_enabled");
 export const setAutostart = (enabled) => invoke("set_autostart", { enabled });
 export const platform = () => invoke("platform");
@@ -32,3 +33,4 @@ export const updateStatus = () => invoke("update_status");
 export const checkForUpdates = () => invoke("check_for_updates");
 export const openReleasePage = (url) => invoke("open_release_page", { url });
 export const setupStatus = () => invoke("setup_status");
+export const takeSection = () => invoke("take_section");

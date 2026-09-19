@@ -28,7 +28,7 @@ pub use self::macos::accessibility_trusted as macos_accessibility_trusted;
 
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 /// How the dictate binding behaves.
@@ -71,10 +71,93 @@ pub enum Action {
 }
 
 /// A binding and what it triggers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bound {
     pub binding: Binding,
     pub action: Action,
+}
+
+/// The bindings in force, shared by the platform listener, the state machine and the
+/// config watcher. Swapping the list is what makes a hotkey change take effect without
+/// a restart: the listener is installed once and reads through this on every key.
+#[derive(Clone)]
+pub struct Bindings(Arc<RwLock<Vec<Bound>>>);
+
+impl Bindings {
+    pub fn new(list: Vec<Bound>) -> Self {
+        let this = Bindings(Arc::new(RwLock::new(Vec::new())));
+        this.set(list);
+        this
+    }
+
+    /// Replaces the list, and says whether that changed anything. Most modifiers
+    /// first: without this, a binding of Ctrl+Space registered before
+    /// Ctrl+Shift+Space would swallow the latter, since the listener takes the first
+    /// match.
+    pub fn set(&self, mut list: Vec<Bound>) -> bool {
+        list.sort_by_key(|b| {
+            let m = &b.binding;
+            std::cmp::Reverse(m.ctrl as u8 + m.alt as u8 + m.shift as u8 + m.win as u8)
+        });
+        let mut current = self.0.write().unwrap();
+        if *current == list {
+            return false;
+        }
+        *current = list;
+        true
+    }
+
+    pub(crate) fn read(&self) -> RwLockReadGuard<'_, Vec<Bound>> {
+        self.0.read().unwrap()
+    }
+
+    /// The rendered binding for an action, for the tray and the toasts.
+    pub fn label(&self, action: &Action) -> Option<String> {
+        self.read()
+            .iter()
+            .find(|b| b.action == *action)
+            .map(|b| describe(&b.binding))
+    }
+}
+
+/// Pairs each key-up with the key-down that matched, so a release counts for the
+/// binding that started it whatever the modifiers are doing by then. Without this,
+/// letting go of Ctrl a moment before Space makes the Space release look like an
+/// unbound key, the hold never ends, and the next press is read as key repeat.
+///
+/// `K` is the platform's own key identity; repeats of a held key report the binding
+/// it matched first.
+pub(crate) struct Matcher<K> {
+    down: Vec<(usize, K)>,
+}
+
+impl<K: PartialEq + Copy> Matcher<K> {
+    pub(crate) const fn new() -> Self {
+        Matcher { down: Vec::new() }
+    }
+
+    /// Which binding this edge belongs to, if any. `find` is consulted only for a
+    /// fresh press; a key already down answers for itself.
+    pub(crate) fn resolve(
+        &mut self,
+        key: K,
+        down: bool,
+        find: impl FnOnce() -> Option<usize>,
+    ) -> Option<usize> {
+        if let Some(i) = self.down.iter().position(|(_, k)| *k == key) {
+            let (which, _) = self.down[i];
+            if !down {
+                self.down.remove(i);
+            }
+            return Some(which);
+        }
+        if !down {
+            return None;
+        }
+        let which = find()?;
+        self.down.push((which, key));
+        Some(which)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -169,20 +252,11 @@ pub(crate) struct RawKey {
 /// Every platform's listener wants a thread of its own for the lifetime of the process
 /// -- a message pump on Windows, a run loop on macOS, blocking reads on Linux.
 pub fn run(
-    mut bindings: Vec<Bound>,
+    bindings: Bindings,
     mode: Arc<Mutex<Mode>>,
     tap_threshold: Duration,
     events: Sender<Event>,
 ) {
-    // Most modifiers first. Without this, a binding of Ctrl+Space registered before
-    // Ctrl+Shift+Space would swallow the latter, since the listener takes the first match.
-    bindings.sort_by_key(|b| {
-        let m = &b.binding;
-        std::cmp::Reverse(
-            m.ctrl as u8 + m.alt as u8 + m.shift as u8 + m.win as u8,
-        )
-    });
-
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<RawKey>();
 
     let for_state_machine = bindings.clone();
@@ -197,7 +271,7 @@ pub fn run(
 /// `mode` is shared rather than copied: changing the press style in settings has to
 /// take effect without restarting the app, or it reads as the setting doing nothing.
 fn state_machine(
-    bindings: Vec<Bound>,
+    bindings: Bindings,
     mode: Arc<Mutex<Mode>>,
     tap_threshold: Duration,
     raw: std::sync::mpsc::Receiver<RawKey>,
@@ -217,7 +291,7 @@ fn state_machine(
     let mut down_binding: Option<usize> = None;
 
     for event in raw {
-        let Some(bound) = bindings.get(event.which) else {
+        let Some(bound) = bindings.read().get(event.which).cloned() else {
             continue;
         };
 
@@ -351,7 +425,13 @@ mod tests {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel();
 
         let worker = std::thread::spawn(move || {
-            state_machine(bound(), Arc::new(Mutex::new(mode)), THRESHOLD, raw_rx, ev_tx);
+            state_machine(
+                Bindings::new(bound()),
+                Arc::new(Mutex::new(mode)),
+                THRESHOLD,
+                raw_rx,
+                ev_tx,
+            );
         });
 
         for (down, pause) in script {
@@ -432,5 +512,42 @@ mod tests {
             &[(true, NONE), (true, NONE), (true, NONE), (false, BRIEF)],
         );
         assert_eq!(events, vec![start()]);
+    }
+
+    /// Drives a matcher the way a platform listener does: `held` stands in for the
+    /// modifier check at the moment of each edge.
+    fn edge(m: &mut Matcher<u16>, key: u16, down: bool, held: bool) -> Option<usize> {
+        m.resolve(key, down, || if held && key == 0x20 { Some(0) } else { None })
+    }
+
+    /// The release-order bug: Ctrl lifted a moment before Space. The modifier check
+    /// fails on the Space release, but it is still the end of the same press.
+    #[test]
+    fn a_release_counts_even_when_the_modifiers_lifted_first() {
+        let mut m = Matcher::new();
+        assert_eq!(edge(&mut m, 0x20, true, true), Some(0));
+        assert_eq!(edge(&mut m, 0x20, false, false), Some(0));
+        // And the next press is a fresh press, not a repeat.
+        assert_eq!(edge(&mut m, 0x20, true, true), Some(0));
+        assert_eq!(edge(&mut m, 0x20, false, true), Some(0));
+    }
+
+    #[test]
+    fn a_bare_release_or_an_unbound_key_is_nobody_s() {
+        let mut m = Matcher::new();
+        assert_eq!(edge(&mut m, 0x20, false, true), None, "release with no press");
+        assert_eq!(edge(&mut m, 0x41, true, true), None, "a key no binding uses");
+        assert_eq!(edge(&mut m, 0x20, true, false), None, "Space without Ctrl");
+        assert_eq!(edge(&mut m, 0x20, false, false), None);
+    }
+
+    /// Key repeat arrives as more key-downs; each answers for the press it belongs to,
+    /// even if a modifier has changed underneath it.
+    #[test]
+    fn repeats_belong_to_the_press_that_started_them() {
+        let mut m = Matcher::new();
+        assert_eq!(edge(&mut m, 0x20, true, true), Some(0));
+        assert_eq!(edge(&mut m, 0x20, true, false), Some(0));
+        assert_eq!(edge(&mut m, 0x20, false, false), Some(0));
     }
 }

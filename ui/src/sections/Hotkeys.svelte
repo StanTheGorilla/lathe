@@ -119,11 +119,6 @@
   <div class="status bad">{conflict}</div>
 {/if}
 
-<div class="status info">
-  Changing a binding needs a restart. The hook that watches the keyboard is installed
-  once at startup and cannot be rebound while running.
-</div>
-
 <div class="field">
   <label for="hotkey">Dictate</label>
   <button

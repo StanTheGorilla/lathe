@@ -56,7 +56,7 @@ impl Ui {
             let hotkey = self
                 .app
                 .try_state::<crate::AppState>()
-                .map(|s| s.hotkey_label.clone())
+                .and_then(|s| s.bindings.label(&lathe_core::hotkey::Action::Record))
                 .unwrap_or_default();
             let _ = tray.set_tooltip(Some(state.tooltip(&hotkey)));
         }
@@ -241,6 +241,20 @@ fn dictate(
     // Set when a preset-specific hotkey started this dictation.
     preset_override: Option<&str>,
 ) {
+    // A press that began and ended while the previous dictation was still processing
+    // has both edges queued already. Recording nothing for it would only produce a
+    // spurious "heard no speech".
+    match rx.try_recv() {
+        Ok(Msg::Hotkey(hotkey::Event::Stop)) => {
+            eprintln!("hotkey: released before Lathe was free; nothing recorded");
+            return;
+        }
+        Ok(Msg::Benchmark(reply)) => {
+            let _ = reply.send(Err("a dictation is in progress".into()));
+        }
+        _ => {}
+    }
+
     // Start capturing before anything else. Models load while the user is already
     // talking, so a cold first dictation costs latency but never loses words.
     let recorder = match Recorder::start(&config.audio.input_device) {
@@ -293,6 +307,11 @@ fn dictate(
             return;
         }
         ui.state(State::Recording);
+        // Open work item 5: a load that spilled into system memory is 20-40x slower
+        // and otherwise only says so in the log.
+        if let Some(warning) = engine.take_spill_warning() {
+            crate::notify_user("Lathe: models did not fit in graphics memory", &warning);
+        }
     }
 
     // Wait for the release, or the hard cap from brief 5.1.
@@ -371,7 +390,8 @@ fn dictate(
             // know nothing is coming, and why, or a silent no-op looks like a crash.
             ui.nothing_to_do(
                 "Lathe heard no speech",
-                "Nothing was transcribed. Check the microphone is the right one and \n                 that its level is not too low, in Settings under Audio.",
+                "Nothing was transcribed. Check the microphone is the right one and \
+                 that its level is not too low, in Settings under Audio.",
             );
         }
         Processed::Rejected(Rejected::EmptyTranscript) => {
@@ -389,6 +409,7 @@ fn dictate(
                 if let Some(history) = history {
                     if let Err(e) = history.record(
                         &outcome.preset,
+                        &outcome.language,
                         &outcome.raw,
                         &outcome.cleaned,
                         outcome.audio_secs,

@@ -26,7 +26,9 @@ trims the silence, a speech model transcribes on the GPU, a second model punctua
 capitalises, and the text is pasted into the focused window.
 
 There is no window until you open the settings, and no models in memory until the first
-dictation. Both are freed again when you are done.
+dictation. The window closes when you are done with it; the models stay resident, since
+reloading them while something else holds the card lands them in system memory and
+makes every dictation slow.
 
 ## What is in the box
 
@@ -67,7 +69,8 @@ rather than asking you to read everything again.
 ## Models
 
 Speech is Cohere Transcribe (Q8_0), cleanup is S1-mini for English and Gemma 4 E2B for
-everything else, all fetched on first run. Superwhisper publishes S1-mini only at F16
+everything else. Nothing downloads by itself: the first launch opens Settings > Models,
+where each one is a button. Superwhisper publishes S1-mini only at F16
 and Q4_K_M, and Q4_K_M was measured dropping whole clauses, so Lathe ships two builds
 of its own at
 [stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF](https://huggingface.co/stanthegorilla/S1-mini-Q8_0-Q6_K-GGUF):
@@ -199,7 +202,6 @@ you would rather never open the window, you never have to.
 crates/core          audio, models, vocabulary, history, the pipeline
 crates/lathe         the tray app: hotkey hook, worker thread, Tauri shell
 crates/spike         measurement CLI — benchmark, accuracy harness, device probes
-crates/cohere-probe  a standalone check that the speech model runs at all
 ui/                  the settings window (Svelte)
 scripts/             build, model download, asset generation
 ```

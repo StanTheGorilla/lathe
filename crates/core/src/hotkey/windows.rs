@@ -4,12 +4,12 @@
 // event and hand it off: Windows silently unhooks a callback that exceeds
 // LowLevelHooksTimeout (300ms by default), and a dropped hook fails silently.
 
-use super::{Binding, Bound, RawKey};
+use super::{Binding, Bindings, Matcher, RawKey};
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -21,7 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub(super) const SUPER_LABEL: &str = "Win";
 
 static HOOK_TX: OnceLock<Sender<RawKey>> = OnceLock::new();
-static BINDINGS: OnceLock<Vec<Bound>> = OnceLock::new();
+static BINDINGS: OnceLock<Bindings> = OnceLock::new();
+/// Only the hook thread touches this; the lock is for the `static`, not for contention.
+static MATCHER: Mutex<Matcher<u16>> = Mutex::new(Matcher::new());
 
 fn modifiers_held(binding: &Binding) -> bool {
     // Read the modifier state at event time rather than tracking it ourselves, so the
@@ -30,7 +32,7 @@ fn modifiers_held(binding: &Binding) -> bool {
     down(VK_CONTROL) == binding.ctrl
         && down(VK_MENU) == binding.alt
         && down(VK_SHIFT) == binding.shift
-        && down(VK_LWIN) == binding.win
+        && (down(VK_LWIN) || down(VK_RWIN)) == binding.win
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -41,21 +43,22 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
-        if let Some(bindings) = BINDINGS.get() {
+        if let (Some(bindings), true) = (BINDINGS.get(), down || up) {
             // First match wins. More specific combinations are sorted ahead of less
             // specific ones at registration, so Ctrl+Shift+Space is tested before
             // Ctrl+Space and the two do not shadow each other.
-            if down || up {
-                if let Some(which) = bindings
+            let matched = MATCHER.lock().unwrap().resolve(vk, down, || {
+                bindings
+                    .read()
                     .iter()
                     .position(|b| vk == b.binding.key && modifiers_held(&b.binding))
-                {
-                    if let Some(tx) = HOOK_TX.get() {
-                        let _ = tx.send(RawKey { which, down });
-                    }
-                    // Swallow it so it never reaches the focused application.
-                    return LRESULT(1);
+            });
+            if let Some(which) = matched {
+                if let Some(tx) = HOOK_TX.get() {
+                    let _ = tx.send(RawKey { which, down });
                 }
+                // Swallow it so it never reaches the focused application.
+                return LRESULT(1);
             }
         }
     }
@@ -66,7 +69,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 ///
 /// A WH_KEYBOARD_LL hook only delivers events to a thread that pumps messages, so this
 /// owns a thread for the lifetime of the process.
-pub(super) fn listen(bindings: Vec<Bound>, raw_tx: Sender<RawKey>) {
+pub(super) fn listen(bindings: Bindings, raw_tx: Sender<RawKey>) {
     let _ = HOOK_TX.set(raw_tx);
     let _ = BINDINGS.set(bindings);
 

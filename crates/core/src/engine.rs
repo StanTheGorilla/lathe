@@ -12,6 +12,8 @@ pub struct Outcome {
     pub raw: String,
     pub cleaned: String,
     pub preset: String,
+    /// The language it was recognised in, for the history.
+    pub language: String,
     pub audio_secs: f32,
     pub asr_ms: u128,
     pub cleanup_ms: u128,
@@ -47,6 +49,9 @@ pub struct Engine {
     /// Resolved once per process. Enumerating adapters initialises the Vulkan backend,
     /// and the answer cannot change while the app is running.
     gpu: Option<crate::asr::Gpu>,
+    /// The warning from the last load whose weights did not fit the card, until
+    /// someone takes it to show the user. The log line alone was found to be invisible.
+    spill_warning: Option<String>,
     last_used: Instant,
 }
 
@@ -61,8 +66,14 @@ impl Engine {
             cleanup_multilingual: None,
             cleanup_multilingual_missing: false,
             gpu: None,
+            spill_warning: None,
             last_used: Instant::now(),
         })
+    }
+
+    /// The last load's "will not fit" warning, once. `None` when it fitted.
+    pub fn take_spill_warning(&mut self) -> Option<String> {
+        self.spill_warning.take()
     }
 
     /// The device index and layer count to load a cleanup model with.
@@ -244,9 +255,10 @@ impl Engine {
             .sum();
         let (line, warning) = crate::asr::vram_report(free, needed as usize);
         eprintln!("{line}");
-        if let Some(warning) = warning {
+        if let Some(warning) = &warning {
             eprintln!("warning: {warning}");
         }
+        self.spill_warning = warning;
     }
 
     fn backend_mut(slot: &mut Option<LlamaBackend>) -> Result<&LlamaBackend> {
@@ -431,6 +443,7 @@ impl Engine {
             raw: transcript.text,
             cleaned,
             preset: preset.name.clone(),
+            language: lang.to_string(),
             audio_secs: transcript.audio_secs,
             asr_ms: transcript.infer_ms,
             cleanup_ms,

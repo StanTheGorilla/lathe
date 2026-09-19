@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
-  import { loadConfig, saveConfig, configPath } from "./api.js";
+  import { listen } from "@tauri-apps/api/event";
+  import { loadConfig, saveConfig, configPath, takeSection } from "./api.js";
   import Presets from "./sections/Presets.svelte";
   import Vocabulary from "./sections/Vocabulary.svelte";
   import Hotkeys from "./sections/Hotkeys.svelte";
@@ -57,16 +58,41 @@
   let dirty = $state(false);
   let saving = $state(false);
   let error = $state("");
+  // The file changed underneath unsaved edits: a tray switch, or a hand edit. Saving
+  // would write the stale copy back over it, so say so and offer the fresh one.
+  let stale = $state(false);
 
   const Current = $derived(SECTIONS.find((s) => s.id === active).component);
 
-  onMount(async () => {
-    try {
-      config = await loadConfig();
-      path = await configPath();
-    } catch (e) {
-      error = String(e);
-    }
+  // The core opens this window on a section of its own choosing when it has a reason
+  // to: the Models tab when there is nothing to dictate with yet.
+  async function showRequested() {
+    const section = await takeSection().catch(() => null);
+    if (section && SECTIONS.some((s) => s.id === section)) active = section;
+  }
+
+  onMount(() => {
+    (async () => {
+      try {
+        config = await loadConfig();
+        path = await configPath();
+        await showRequested();
+      } catch (e) {
+        error = String(e);
+      }
+    })();
+    const unlistenShow = listen("show-section", showRequested);
+    // The core emits this after every reload of config.toml, including the one our
+    // own save triggers. With nothing edited here, just take the new copy.
+    const unlisten = listen("config-reloaded", () => {
+      if (saving) return;
+      if (dirty) stale = true;
+      else revert();
+    });
+    return () => {
+      unlisten.then((f) => f());
+      unlistenShow.then((f) => f());
+    };
   });
 
   function touched() {
@@ -90,6 +116,7 @@
     try {
       config = await loadConfig();
       dirty = false;
+      stale = false;
       error = "";
     } catch (e) {
       error = String(e);
@@ -152,7 +179,12 @@
           </button>
           <button onclick={revert} disabled={saving}>Revert</button>
           <span class="hint" style="margin:0">
-            The core reloads the file automatically. Hotkey changes need a restart.
+            {#if stale}
+              The file changed outside this window since you started editing. Saving
+              overwrites that; Revert loads it.
+            {:else}
+              The core reloads the file automatically.
+            {/if}
           </span>
         </div>
       {/if}

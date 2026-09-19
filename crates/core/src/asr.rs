@@ -335,7 +335,8 @@ pub fn vram_report(free: usize, needed: usize) -> (String, Option<String>) {
     );
     let warning = (needed > free).then(|| {
         format!(
-            "weights do not fit in graphics memory ({} MiB short); dictation will be slow              until other applications release memory and the models are reloaded",
+            "weights do not fit in graphics memory ({} MiB short); dictation will be slow \
+             until other applications release memory and the models are reloaded",
             mib(needed - free)
         )
     });

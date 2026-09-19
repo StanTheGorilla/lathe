@@ -1,6 +1,12 @@
 <script>
   import { onMount } from "svelte";
-  import { historyRecent, historyStats, historyWipe, historyPaste } from "../api.js";
+  import {
+    historyRecent,
+    historyStats,
+    historyWipe,
+    historyPaste,
+    historyCorrect,
+  } from "../api.js";
 
   let { config = $bindable(), onchange } = $props();
 
@@ -9,6 +15,13 @@
   let search = $state("");
   let error = $state("");
   let confirmingWipe = $state(false);
+  // The item whose cleaned text is open for editing, and the draft.
+  let editing = $state(null);
+  let draft = $state("");
+  // A correction that changed exactly one word: offered to the vocabulary, since a
+  // word fixed by hand is a mishearing the correction pass could catch next time.
+  let offer = $state(null);
+  let offerSet = $state("");
 
   async function refresh() {
     error = "";
@@ -29,6 +42,42 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  function edit(item) {
+    editing = item.id;
+    draft = item.cleaned;
+  }
+
+  async function saveEdit(item) {
+    error = "";
+    try {
+      const change = await historyCorrect(item.id, draft);
+      offer = change ? { heard: change[0], write: change[1] } : null;
+      offerSet = config.vocabulary.sets[0]?.name ?? "";
+      editing = null;
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Adds the mishearing as a spoken form of the wanted word in the chosen set,
+  // creating the word if the set does not have it. Written by the save bar like any
+  // other vocabulary edit.
+  function learn() {
+    const set = config.vocabulary.sets.find((s) => s.name === offerSet);
+    if (!set) return;
+    const term = set.terms.find((t) => t.write.toLowerCase() === offer.write.toLowerCase());
+    if (term) {
+      if (!term.heard.some((h) => h.toLowerCase() === offer.heard.toLowerCase())) {
+        term.heard = [...term.heard, offer.heard];
+      }
+    } else {
+      set.terms = [...set.terms, { write: offer.write, heard: [offer.heard] }];
+    }
+    offer = null;
+    onchange();
   }
 
   async function wipe() {
@@ -119,7 +168,7 @@
     <div class="history-item">
       <div class="history-meta">
         <span>{when(item.at)}</span>
-        <span>{item.preset}</span>
+        <span>{item.preset}{item.language ? " · " + item.language : ""}</span>
         <span class="mono">{duration(item.audio_secs)}</span>
         <span class="mono">{item.asr_ms + item.cleanup_ms} ms</span>
         <span class="history-actions">
@@ -127,14 +176,53 @@
           {#if item.raw !== item.cleaned}
             <button onclick={() => paste(item.id, true)}>Paste raw</button>
           {/if}
+          <button onclick={() => (editing === item.id ? (editing = null) : edit(item))}>
+            {editing === item.id ? "Cancel" : "Edit"}
+          </button>
         </span>
       </div>
-      <p class="history-text">{item.cleaned || "(empty)"}</p>
+      {#if editing === item.id}
+        <textarea
+          class="history-edit"
+          aria-label="Corrected text"
+          bind:value={draft}
+          onkeydown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), saveEdit(item))}
+        ></textarea>
+        <div class="row" style="margin-top:6px">
+          <button class="primary" onclick={() => saveEdit(item)}>Save correction</button>
+          <span class="hint" style="margin:0">
+            Fix one misheard word and Lathe offers to remember it.
+          </span>
+        </div>
+      {:else}
+        <p class="history-text">{item.cleaned || "(empty)"}</p>
+      {/if}
       {#if item.raw !== item.cleaned}
         <p class="history-raw mono">{item.raw}</p>
       {/if}
     </div>
   {/each}
+{/if}
+
+{#if offer}
+  <div class="status info">
+    <div class="row">
+      <span>
+        Add <span class="mono">{offer.heard}</span> as a way of hearing
+        <span class="mono">{offer.write}</span> to
+      </span>
+      <select aria-label="Vocabulary set" bind:value={offerSet}>
+        {#each config.vocabulary.sets as s}
+          <option value={s.name}>{s.name}</option>
+        {/each}
+      </select>
+      <button class="primary" onclick={learn} disabled={!offerSet}>Add</button>
+      <button onclick={() => (offer = null)}>No</button>
+    </div>
+    <p class="hint" style="margin:6px 0 0">
+      It lands in the vocabulary as a spoken form; Save changes below writes it.
+    </p>
+  </div>
 {/if}
 
 <h2>Retention</h2>
@@ -197,6 +285,10 @@
   .history-text {
     margin: 0;
     user-select: text;
+  }
+  .history-edit {
+    width: 100%;
+    min-height: 60px;
   }
   .history-raw {
     margin: 4px 0 0;

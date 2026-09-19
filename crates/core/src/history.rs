@@ -23,6 +23,9 @@ pub struct Item {
     /// Unix seconds.
     pub at: i64,
     pub preset: String,
+    /// ISO 639-1 code the dictation was recognised in. Empty for rows recorded before
+    /// the column existed.
+    pub language: String,
     pub raw: String,
     pub cleaned: String,
     pub audio_secs: f32,
@@ -70,6 +73,18 @@ impl History {
         )
         .context("creating the history table")?;
 
+        // Added after the table shipped. SQLite has no ADD COLUMN IF NOT EXISTS, so
+        // look first.
+        let has_language = conn
+            .prepare("SELECT 1 FROM pragma_table_info('dictations') WHERE name = 'language'")?
+            .exists([])?;
+        if !has_language {
+            conn.execute_batch(
+                "ALTER TABLE dictations ADD COLUMN language TEXT NOT NULL DEFAULT ''",
+            )
+            .context("adding the language column")?;
+        }
+
         Ok(Self { conn, limit })
     }
 
@@ -80,6 +95,7 @@ impl History {
     pub fn record(
         &self,
         preset: &str,
+        language: &str,
         raw: &str,
         cleaned: &str,
         audio_secs: f32,
@@ -92,11 +108,12 @@ impl History {
             .unwrap_or(0);
 
         self.conn.execute(
-            "INSERT INTO dictations (at, preset, raw, cleaned, audio_secs, asr_ms, cleanup_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO dictations (at, preset, language, raw, cleaned, audio_secs, asr_ms, cleanup_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 now,
                 preset,
+                language,
                 raw,
                 cleaned,
                 audio_secs as f64,
@@ -123,24 +140,13 @@ impl History {
     pub fn recent(&self, limit: usize, search: &str) -> Result<Vec<Item>> {
         let pattern = format!("%{}%", search.trim());
         let mut statement = self.conn.prepare(
-            "SELECT id, at, preset, raw, cleaned, audio_secs, asr_ms, cleanup_ms
+            "SELECT id, at, preset, language, raw, cleaned, audio_secs, asr_ms, cleanup_ms
              FROM dictations
              WHERE (?1 = '%%') OR raw LIKE ?1 COLLATE NOCASE OR cleaned LIKE ?1 COLLATE NOCASE
              ORDER BY id DESC LIMIT ?2",
         )?;
 
-        let rows = statement.query_map(params![pattern, limit as i64], |row| {
-            Ok(Item {
-                id: row.get(0)?,
-                at: row.get(1)?,
-                preset: row.get(2)?,
-                raw: row.get(3)?,
-                cleaned: row.get(4)?,
-                audio_secs: row.get::<_, f64>(5)? as f32,
-                asr_ms: row.get(6)?,
-                cleanup_ms: row.get(7)?,
-            })
-        })?;
+        let rows = statement.query_map(params![pattern, limit as i64], item_from_row)?;
 
         Ok(rows.filter_map(Result::ok).collect())
     }
@@ -193,6 +199,16 @@ impl History {
         Ok(stats)
     }
 
+    /// Replaces the cleaned text of one dictation with the user's correction. The raw
+    /// transcript stays as heard: the pair is what the vocabulary learns from.
+    pub fn correct(&self, id: i64, cleaned: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE dictations SET cleaned = ?2 WHERE id = ?1",
+            params![id, cleaned],
+        )?;
+        Ok(())
+    }
+
     pub fn wipe(&self) -> Result<()> {
         self.conn.execute("DELETE FROM dictations", [])?;
         self.conn.execute_batch("VACUUM")?;
@@ -201,21 +217,10 @@ impl History {
 
     pub fn get(&self, id: i64) -> Result<Option<Item>> {
         let items = self.conn.query_row(
-            "SELECT id, at, preset, raw, cleaned, audio_secs, asr_ms, cleanup_ms
+            "SELECT id, at, preset, language, raw, cleaned, audio_secs, asr_ms, cleanup_ms
              FROM dictations WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(Item {
-                    id: row.get(0)?,
-                    at: row.get(1)?,
-                    preset: row.get(2)?,
-                    raw: row.get(3)?,
-                    cleaned: row.get(4)?,
-                    audio_secs: row.get::<_, f64>(5)? as f32,
-                    asr_ms: row.get(6)?,
-                    cleanup_ms: row.get(7)?,
-                })
-            },
+            item_from_row,
         );
         match items {
             Ok(item) => Ok(Some(item)),
@@ -223,6 +228,47 @@ impl History {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// The one word a correction changed, as (heard, wanted), when that is all it did.
+///
+/// Open work item 4, option 2: a hand-fixed word is a mishearing the vocabulary could
+/// carry as a spoken form, so the app offers it. Only a single substituted word
+/// qualifies -- the correction pass works one word at a time, and a change of case or
+/// punctuation alone is a styling matter, not a recognition error.
+pub fn single_word_change(before: &str, after: &str) -> Option<(String, String)> {
+    let strip = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+            .to_string()
+    };
+    let a: Vec<String> = before.split_whitespace().map(strip).collect();
+    let b: Vec<String> = after.split_whitespace().map(strip).collect();
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut changed = a.iter().zip(&b).filter(|(x, y)| x != y);
+    let (heard, wanted) = changed.next()?;
+    if changed.next().is_some() || heard.is_empty() || wanted.is_empty() {
+        return None;
+    }
+    if heard.eq_ignore_ascii_case(wanted) || heard.to_lowercase() == wanted.to_lowercase() {
+        return None;
+    }
+    Some((heard.clone(), wanted.clone()))
+}
+
+fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
+    Ok(Item {
+        id: row.get(0)?,
+        at: row.get(1)?,
+        preset: row.get(2)?,
+        language: row.get(3)?,
+        raw: row.get(4)?,
+        cleaned: row.get(5)?,
+        audio_secs: row.get::<_, f64>(6)? as f32,
+        asr_ms: row.get(7)?,
+        cleanup_ms: row.get(8)?,
+    })
 }
 
 #[cfg(test)]
@@ -248,7 +294,7 @@ mod tests {
     fn keeps_only_the_retention_limit() {
         let h = temp();
         for i in 0..6 {
-            h.record("Prompt", &format!("raw {i}"), &format!("clean {i}"), 1.0, 10, 5)
+            h.record("Prompt", "en", &format!("raw {i}"), &format!("clean {i}"), 1.0, 10, 5)
                 .unwrap();
         }
         let items = h.recent(100, "").unwrap();
@@ -260,9 +306,9 @@ mod tests {
     #[test]
     fn searches_both_transcripts() {
         let h = temp();
-        h.record("Prompt", "needle in raw", "nothing here", 1.0, 1, 1)
+        h.record("Prompt", "en", "needle in raw", "nothing here", 1.0, 1, 1)
             .unwrap();
-        h.record("Prompt", "nothing", "needle in cleaned", 1.0, 1, 1)
+        h.record("Prompt", "en", "nothing", "needle in cleaned", 1.0, 1, 1)
             .unwrap();
         assert_eq!(h.recent(100, "needle").unwrap().len(), 2);
         assert_eq!(h.recent(100, "absent").unwrap().len(), 0);
@@ -273,17 +319,81 @@ mod tests {
         let h = temp();
         // 40 words at 40 WPM is one minute of typing; spoken in 10 seconds.
         let text = (0..40).map(|_| "word").collect::<Vec<_>>().join(" ");
-        h.record("Prompt", &text, &text, 10.0, 100, 50).unwrap();
+        h.record("Prompt", "en", &text, &text, 10.0, 100, 50).unwrap();
         let s = h.stats().unwrap();
         assert_eq!(s.words, 40);
         assert!((s.seconds_saved - 50.0).abs() < 0.01, "got {}", s.seconds_saved);
         assert!((s.avg_latency_ms - 150.0).abs() < 0.01);
     }
 
+    /// A database from before the column existed opens, gains it, and keeps its rows.
+    #[test]
+    fn an_old_database_gains_the_language_column() {
+        let path = std::env::temp_dir().join(format!("lathe-test-old-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE dictations (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+                     preset TEXT NOT NULL, raw TEXT NOT NULL, cleaned TEXT NOT NULL,
+                     audio_secs REAL NOT NULL, asr_ms INTEGER NOT NULL,
+                     cleanup_ms INTEGER NOT NULL);
+                 INSERT INTO dictations VALUES (1, 0, 'Prompt', 'old', 'Old.', 1.0, 1, 1);",
+            )
+            .unwrap();
+        }
+        let h = History::open(&path, 10).unwrap();
+        h.record("Prompt", "pl", "nowy", "Nowy.", 1.0, 1, 1).unwrap();
+        let items = h.recent(10, "").unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].language, "pl");
+        assert_eq!(items[1].language, "", "rows from before carry no language");
+        // Opening again must not try to add the column twice.
+        drop(h);
+        History::open(&path, 10).unwrap();
+    }
+
+    #[test]
+    fn a_correction_replaces_the_cleaned_text_only() {
+        let h = temp();
+        h.record("Prompt", "en", "open grappify", "Open Grappify.", 1.0, 1, 1)
+            .unwrap();
+        let id = h.recent(1, "").unwrap()[0].id;
+        h.correct(id, "Open graphify.").unwrap();
+        let item = h.get(id).unwrap().unwrap();
+        assert_eq!(item.cleaned, "Open graphify.");
+        assert_eq!(item.raw, "open grappify");
+    }
+
+    #[test]
+    fn one_substituted_word_is_offered_as_a_spoken_form() {
+        assert_eq!(
+            single_word_change("Open Grappify, please.", "Open graphify, please."),
+            Some(("Grappify".into(), "graphify".into()))
+        );
+        // Punctuation around the word is not part of it.
+        assert_eq!(
+            single_word_change("It was Lata.", "It was Lathe."),
+            Some(("Lata".into(), "Lathe".into()))
+        );
+    }
+
+    #[test]
+    fn anything_but_one_word_is_not() {
+        assert_eq!(single_word_change("a b c", "a b c"), None, "nothing changed");
+        assert_eq!(single_word_change("a b c", "a x y"), None, "two words");
+        assert_eq!(single_word_change("a b c", "a b"), None, "a word removed");
+        assert_eq!(single_word_change("a b c", "a b c d"), None, "a word added");
+        assert_eq!(single_word_change("a lathe c", "a Lathe c"), None, "case only");
+        assert_eq!(single_word_change("a b, c", "a b. c"), None, "punctuation only");
+        assert_eq!(single_word_change("a b c", "a , c"), None, "replaced by nothing");
+    }
+
     #[test]
     fn wipe_empties_it() {
         let h = temp();
-        h.record("Prompt", "a", "b", 1.0, 1, 1).unwrap();
+        h.record("Prompt", "en", "a", "b", 1.0, 1, 1).unwrap();
         h.wipe().unwrap();
         assert_eq!(h.recent(10, "").unwrap().len(), 0);
         assert_eq!(h.stats().unwrap().dictations, 0);

@@ -10,11 +10,10 @@
 // every keyboard exclusively and re-emitting everything but the hotkey, and a bug in
 // that path is a dead keyboard.
 
-use super::{Binding, Bound, RawKey};
+use super::{Binding, Bindings, Matcher, RawKey};
 use evdev::{Device, EventSummary, KeyCode};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 /// How the Super key is written back to the user.
 pub(super) const SUPER_LABEL: &str = "Super";
@@ -151,12 +150,10 @@ pub fn keyboard_readable() -> bool {
 }
 
 /// Reads one keyboard until it goes away.
-fn read_device(
-    mut device: Device,
-    bindings: Arc<Vec<(Option<KeyCode>, Bound)>>,
-    tx: Sender<RawKey>,
-) {
+fn read_device(mut device: Device, bindings: Bindings, tx: Sender<RawKey>) {
     let name = device.name().unwrap_or("unnamed keyboard").to_string();
+    // Per keyboard: a key goes up on the device it went down on.
+    let mut matcher = Matcher::new();
     loop {
         let events = match device.fetch_events() {
             Ok(events) => events,
@@ -182,10 +179,12 @@ fn read_device(
                 continue;
             }
             let held = HELD.load(Ordering::Acquire);
-            if let Some(which) = bindings
-                .iter()
-                .position(|(code, b)| *code == Some(key) && modifiers_match(held, &b.binding))
-            {
+            let matched = matcher.resolve(key, down, || {
+                bindings.read().iter().position(|b| {
+                    native_key(b.binding.key) == Some(key) && modifiers_match(held, &b.binding)
+                })
+            });
+            if let Some(which) = matched {
                 let _ = tx.send(RawKey { which, down });
             }
         }
@@ -194,14 +193,7 @@ fn read_device(
 
 /// Opens every keyboard and reads them until the process ends. Returns only when no
 /// keyboard is left to read.
-pub(super) fn listen(bindings: Vec<Bound>, raw_tx: Sender<RawKey>) {
-    let bindings: Arc<Vec<(Option<KeyCode>, Bound)>> = Arc::new(
-        bindings
-            .into_iter()
-            .map(|b| (native_key(b.binding.key), b))
-            .collect(),
-    );
-
+pub(super) fn listen(bindings: Bindings, raw_tx: Sender<RawKey>) {
     let mut readers = Vec::new();
     for (path, device) in evdev::enumerate() {
         if !is_keyboard(&device) {
@@ -212,7 +204,7 @@ pub(super) fn listen(bindings: Vec<Bound>, raw_tx: Sender<RawKey>) {
             device.name().unwrap_or("unnamed keyboard"),
             path.display()
         );
-        let bindings = Arc::clone(&bindings);
+        let bindings = bindings.clone();
         let tx = raw_tx.clone();
         readers.push(std::thread::spawn(move || read_device(device, bindings, tx)));
     }

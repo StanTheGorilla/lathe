@@ -261,6 +261,23 @@ pub async fn history_wipe(state: State<'_, AppState>) -> Reply<()> {
 }
 
 /// Brief 6.4: one-click re-paste of an earlier dictation.
+/// Saves a hand-corrected transcript and says which single word it changed, if that is
+/// all it did, so the window can offer it to the vocabulary as a spoken form.
+#[tauri::command]
+pub async fn history_correct(
+    id: i64,
+    cleaned: String,
+    state: State<'_, AppState>,
+) -> Reply<Option<(String, String)>> {
+    let store = history(&state)?;
+    let before = store
+        .get(id)
+        .map_err(fail)?
+        .ok_or_else(|| "that dictation is no longer in the history".to_string())?;
+    store.correct(id, &cleaned).map_err(fail)?;
+    Ok(lathe_core::history::single_word_change(&before.cleaned, &cleaned))
+}
+
 #[tauri::command]
 pub async fn history_paste(id: i64, raw: bool, state: State<'_, AppState>) -> Reply<()> {
     let store = history(&state)?;
@@ -571,4 +588,11 @@ pub fn open_release_page(url: String) -> Reply<()> {
 #[tauri::command]
 pub fn setup_status() -> Reply<Vec<crate::setup::Problem>> {
     Ok(crate::setup::problems())
+}
+
+/// The section the core wants shown, if it opened the window for one. Cleared on
+/// reading, so a later plain open lands on the default.
+#[tauri::command]
+pub fn take_section(state: State<'_, AppState>) -> Reply<Option<&'static str>> {
+    Ok(state.open_at.lock().unwrap().take())
 }

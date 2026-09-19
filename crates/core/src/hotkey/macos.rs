@@ -8,7 +8,7 @@
 // nothing more: a callback that takes too long gets the tap disabled with a
 // `TapDisabledByTimeout` event, which is why that event re-enables it below.
 
-use super::{Binding, Bound, RawKey};
+use super::{Binding, Bindings, Matcher, RawKey};
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
@@ -25,7 +25,7 @@ use core_graphics::sys::CGEventRef;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// How the Command key is written back to the user.
 pub(super) const SUPER_LABEL: &str = "Cmd";
@@ -61,9 +61,9 @@ extern "C" {
 }
 
 static HOOK_TX: OnceLock<Sender<RawKey>> = OnceLock::new();
-/// Each binding with its key translated to the macOS virtual key code; `None` for a
-/// key macOS has no code for, which then simply never matches.
-static BINDINGS: OnceLock<Vec<(Option<u16>, Bound)>> = OnceLock::new();
+static BINDINGS: OnceLock<Bindings> = OnceLock::new();
+/// Only the tap's thread touches this; the lock is for the `static`, not for contention.
+static MATCHER: Mutex<Matcher<u16>> = Mutex::new(Matcher::new());
 /// The tap's mach port, kept so a disabled tap can be switched back on.
 static TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -178,11 +178,14 @@ unsafe extern "C" fn tap_callback(
     let flags = CGEventGetFlags(event);
 
     if let Some(bindings) = BINDINGS.get() {
-        // First match wins; the bindings arrive sorted most-modifiers-first.
-        if let Some(which) = bindings
-            .iter()
-            .position(|(key, b)| *key == Some(keycode) && modifiers_match(flags, &b.binding))
-        {
+        // First match wins; the bindings are sorted most-modifiers-first. A key macOS
+        // has no code for translates to `None` and simply never matches.
+        let matched = MATCHER.lock().unwrap().resolve(keycode, down, || {
+            bindings.read().iter().position(|b| {
+                native_key(b.binding.key) == Some(keycode) && modifiers_match(flags, &b.binding)
+            })
+        });
+        if let Some(which) = matched {
             if let Some(tx) = HOOK_TX.get() {
                 let _ = tx.send(RawKey { which, down });
             }
@@ -206,14 +209,9 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 }
 
 /// Installs the tap and runs the run loop. Never returns.
-pub(super) fn listen(bindings: Vec<Bound>, raw_tx: Sender<RawKey>) {
+pub(super) fn listen(bindings: Bindings, raw_tx: Sender<RawKey>) {
     let _ = HOOK_TX.set(raw_tx);
-    let _ = BINDINGS.set(
-        bindings
-            .into_iter()
-            .map(|b| (native_key(b.binding.key), b))
-            .collect(),
-    );
+    let _ = BINDINGS.set(bindings);
 
     if !accessibility_trusted(false) {
         eprintln!(

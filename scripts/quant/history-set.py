@@ -1,6 +1,6 @@
 """Splits the dictation history into a held-out eval set and a calibration set.
 
-    python scripts/quant/history-set.py [quant/]
+    python scripts/quant/history-set.py [quant/] [--lang pl]
 
 Reads `%APPDATA%\\Lathe\\history.db` and `config.toml` (for the control line each preset
 maps to) and writes, into the given directory (default `quant/`, which is untracked):
@@ -13,6 +13,10 @@ half of the score. The split is by row id, so it is stable across runs and no di
 ever crosses from calibration into eval. Nothing here leaves the machine: the eval file
 is scored locally and the calibration file only ever feeds `llama-imatrix`, whose output
 is activation statistics, not text.
+
+`--lang` keeps only dictations recognised in that language, since `cleanup-eval` takes
+one language per run. Rows recorded before the app stored the language have none and
+are left out of a filtered set.
 """
 
 import json
@@ -26,7 +30,7 @@ import tomllib
 DEFAULT = ("semi-formal", "prose", "general")
 
 
-def main(out_dir):
+def main(out_dir, lang):
     appdata = os.path.join(os.environ["APPDATA"], "Lathe")
     with open(os.path.join(appdata, "config.toml"), "rb") as f:
         config = tomllib.load(f)
@@ -37,7 +41,10 @@ def main(out_dir):
 
     db = sqlite3.connect(os.path.join(appdata, "history.db"))
     rows = db.execute(
-        "SELECT id, preset, raw, cleaned FROM dictations WHERE raw <> '' ORDER BY id"
+        "SELECT id, preset, raw, cleaned FROM dictations WHERE raw <> '' "
+        + ("AND language = ? " if lang else "")
+        + "ORDER BY id",
+        (lang,) if lang else (),
     ).fetchall()
 
     os.makedirs(out_dir, exist_ok=True)
@@ -58,4 +65,10 @@ def main(out_dir):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "quant")
+    args = sys.argv[1:]
+    lang = None
+    if "--lang" in args:
+        i = args.index("--lang")
+        lang = args[i + 1]
+        del args[i:i + 2]
+    main(args[0] if args else "quant", lang)

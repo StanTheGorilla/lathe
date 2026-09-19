@@ -23,7 +23,7 @@ mod worker;
 use anyhow::Result;
 use lathe_core::config::Config;
 use lathe_core::engine::language_name;
-use lathe_core::hotkey::{self, Action, Binding, Bound};
+use lathe_core::hotkey::{self, Action, Binding, Bindings, Bound};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,15 +41,16 @@ pub struct AppState {
     /// Progress of the model download in flight, if any.
     pub download: Arc<Mutex<Option<commands::DownloadProgress>>>,
     pub download_cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// Rendered dictate binding, shown in the tray tooltip.
-    pub hotkey_label: String,
-    /// Rendered paste-raw binding, for rebuilding the tray menu.
-    pub paste_raw_label: String,
+    /// The bindings in force, for the tray and for the hook. Swapped on config reload.
+    pub bindings: Bindings,
     /// The last binding the hook matched, for the hotkey tester in settings. This is
     /// only ever written for combinations Lathe is bound to -- it is not a log of keys.
     pub last_hotkey: Arc<Mutex<Option<(String, String)>>>,
     /// What the update check last found. Amendment A31.
     pub update: update::Shared,
+    /// The section the settings window should show next, when the core opened it
+    /// with a purpose. Taken by the window once it has loaded.
+    pub open_at: Mutex<Option<&'static str>>,
 }
 
 /// The flags that print something and exit. Only these want a console.
@@ -225,45 +226,8 @@ fn run(args: &[String]) -> Result<()> {
 
     let (config, config_path, first_run) = Config::load_or_create()?;
 
-    // Brief 5.1 and 5.3: the main binding, the paste-raw binding, and one optional
-    // binding per preset. A preset with an unparseable hotkey is reported and skipped
-    // rather than taking the whole app down over a typo in a config file.
-    let mut bindings = vec![Bound {
-        binding: Binding::parse(&config.hotkey)?,
-        action: Action::Record,
-    }];
-
-    // Optional. An empty or unparseable paste-raw binding means "not bound", not a
-    // reason to refuse to start: losing a convenience should never cost the whole app.
-    match config.paste_raw_hotkey.trim() {
-        "" => {}
-        spec => match Binding::parse(spec) {
-            Ok(binding) => bindings.push(Bound {
-                binding,
-                action: Action::PasteRaw,
-            }),
-            Err(e) => eprintln!("paste-raw hotkey unusable, leaving it unbound: {e:#}"),
-        },
-    }
-    for preset in &config.presets {
-        let Some(spec) = preset.hotkey.as_deref().filter(|s| !s.trim().is_empty()) else {
-            continue;
-        };
-        match Binding::parse(spec) {
-            Ok(binding) => bindings.push(Bound {
-                binding,
-                action: Action::RecordPreset(preset.name.clone()),
-            }),
-            Err(e) => eprintln!("preset '{}' has an unusable hotkey: {e:#}", preset.name),
-        }
-    }
-
-    let hotkey_label = hotkey::describe(&bindings[0].binding);
-    let paste_raw_label = bindings
-        .iter()
-        .find(|b| b.action == Action::PasteRaw)
-        .map(|b| hotkey::describe(&b.binding))
-        .unwrap_or_else(|| "unbound".to_string());
+    let bindings = Bindings::new(bindings_for(&config)?);
+    let hotkey_label = bindings.label(&Action::Record).unwrap_or_default();
 
     let tap_threshold = Duration::from_millis(config.tap_threshold_ms);
     let hotkey_mode = Arc::new(Mutex::new(config.hotkey_mode));
@@ -277,32 +241,22 @@ fn run(args: &[String]) -> Result<()> {
         let worker_tx = worker_tx.clone();
         let (hotkey_tx, hotkey_rx) = mpsc::channel::<hotkey::Event>();
         let seen = Arc::clone(&last_hotkey);
-        let labels = bindings
-            .iter()
-            .map(|b| (b.action.clone(), hotkey::describe(&b.binding)))
-            .collect::<Vec<_>>();
+        let labels = bindings.clone();
         std::thread::spawn(move || {
             for event in hotkey_rx {
                 // Record what arrived before forwarding it, so the settings window can
                 // show the user which binding Lathe is actually receiving.
                 let (combo, what) = match &event {
                     hotkey::Event::PasteRaw => (
-                        labels
-                            .iter()
-                            .find(|(a, _)| *a == Action::PasteRaw)
-                            .map(|(_, l)| l.clone())
-                            .unwrap_or_default(),
+                        labels.label(&Action::PasteRaw).unwrap_or_default(),
                         "paste last, uncleaned".to_string(),
                     ),
                     hotkey::Event::Start { preset } => (
                         labels
-                            .iter()
-                            .find(|(a, _)| match (a, preset) {
-                                (Action::RecordPreset(n), Some(p)) => n == p,
-                                (Action::Record, None) => true,
-                                _ => false,
+                            .label(&match preset {
+                                Some(p) => Action::RecordPreset(p.clone()),
+                                None => Action::Record,
                             })
-                            .map(|(_, l)| l.clone())
                             .unwrap_or_default(),
                         match preset {
                             Some(p) => format!("start dictating ({p})"),
@@ -320,8 +274,9 @@ fn run(args: &[String]) -> Result<()> {
             }
         });
         let mode_for_hook = Arc::clone(&hotkey_mode);
+        let for_hook = bindings.clone();
         std::thread::spawn(move || {
-            hotkey::run(bindings, mode_for_hook, tap_threshold, hotkey_tx);
+            hotkey::run(for_hook, mode_for_hook, tap_threshold, hotkey_tx);
         });
     }
 
@@ -332,14 +287,13 @@ fn run(args: &[String]) -> Result<()> {
         meter: Mutex::new(None),
         download: Arc::new(Mutex::new(None)),
         download_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        hotkey_label: hotkey_label.clone(),
-        paste_raw_label: paste_raw_label.clone(),
+        bindings: bindings.clone(),
         last_hotkey: Arc::clone(&last_hotkey),
         update: update::shared(),
+        open_at: Mutex::new(None),
     };
 
     let open_settings_at_start = args.iter().any(|a| a == "--settings");
-    let first_run_label = hotkey_label.clone();
 
     tauri::Builder::default()
         // One instance only. Two copies would install two keyboard hooks and handle
@@ -367,6 +321,7 @@ fn run(args: &[String]) -> Result<()> {
             commands::history_stats,
             commands::history_wipe,
             commands::history_paste,
+            commands::history_correct,
             commands::autostart_enabled,
             commands::set_autostart,
             commands::platform,
@@ -382,9 +337,10 @@ fn run(args: &[String]) -> Result<()> {
             commands::check_for_updates,
             commands::open_release_page,
             commands::setup_status,
+            commands::take_section,
         ])
         .setup(move |app| {
-            build_tray(app.handle(), &config.lock().unwrap(), &hotkey_label, &paste_raw_label)?;
+            build_tray(app.handle(), &config.lock().unwrap(), &bindings)?;
 
             worker::spawn(worker::Context {
                 app: app.handle().clone(),
@@ -406,14 +362,27 @@ fn run(args: &[String]) -> Result<()> {
             update::spawn_checker(app.handle().clone());
             setup::check_at_startup(app.handle().clone());
 
-            // On the very first run the tray icon is the only thing that appeared, and
-            // nothing has told the user which key starts a dictation. Section 8 rules
-            // out an onboarding tour; one notification naming the binding is not that.
-            if first_run {
+            // Nothing works until the models are on disk, and nothing downloads by
+            // itself. Rather than let the first dictation fail with a path, say so
+            // now and land on the screen that fixes it.
+            if !config.lock().unwrap().whisper_path().exists() {
+                notify_user(
+                    "Lathe has no models yet",
+                    &format!(
+                        "Download them under Settings > Models, then hold {hotkey_label} to dictate."
+                    ),
+                );
+                open_settings_at(app.handle(), "models");
+            } else if first_run {
+                // On the very first run the tray icon is the only thing that appeared,
+                // and nothing has told the user which key starts a dictation. Section 8
+                // rules out an onboarding tour; one notification naming the binding is
+                // not that.
                 notify_user(
                     "Lathe is running",
                     &format!(
-                        "Hold {first_run_label} to dictate, or tap it to start and tap \n                         again to stop. The tray icon shows what it is doing."
+                        "Hold {hotkey_label} to dictate, or tap it to start and tap \
+                         again to stop. The tray icon shows what it is doing."
                     ),
                 );
             }
@@ -439,10 +408,13 @@ fn run(args: &[String]) -> Result<()> {
 fn tray_menu(
     app: &AppHandle,
     config: &Config,
-    hotkey: &str,
-    paste_raw: &str,
+    bindings: &Bindings,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
+    let hotkey = bindings.label(&Action::Record).unwrap_or_default();
+    let paste_raw = bindings
+        .label(&Action::PasteRaw)
+        .unwrap_or_else(|| "unbound".to_string());
 
     // Disabled, so it reads as a label rather than an action. The user has to be able
     // to find the binding without opening settings or reading documentation.
@@ -516,21 +488,22 @@ fn switch_label(other: &str) -> String {
     format!("Switch to {}", language_name(other))
 }
 
-/// The tray's language switch. Written to config.toml, not just memory: the language
-/// someone dictates in is a fact about their day, not about this process, and it has
-/// to survive a restart. The file watcher then reloads it and rebuilds the menu.
-fn switch_language(app: &AppHandle, code: &str) {
+/// The tray's switches, written to config.toml and not just memory: the language and
+/// the preset someone dictates with are facts about their day, not about this
+/// process, and they have to survive a restart. The file watcher then reloads the
+/// file and rebuilds the menu.
+fn persist(app: &AppHandle, what: &str, change: impl FnOnce(&mut Config)) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let text = {
         let mut config = state.config.lock().unwrap();
-        config.languages.active = code.to_string();
+        change(&mut config);
         config.to_toml()
     };
     match text.and_then(|t| std::fs::write(&state.config_path, t).map_err(Into::into)) {
-        Ok(()) => eprintln!("language: {}", language_name(code)),
-        Err(e) => eprintln!("could not save the language switch: {e:#}"),
+        Ok(()) => eprintln!("{what}"),
+        Err(e) => eprintln!("could not save the switch ({what}): {e:#}"),
     }
 }
 
@@ -545,7 +518,7 @@ pub fn refresh_tray(app: &AppHandle) {
     };
     let menu = {
         let config = state.config.lock().unwrap();
-        tray_menu(app, &config, &state.hotkey_label, &state.paste_raw_label)
+        tray_menu(app, &config, &state.bindings)
     };
     match menu {
         Ok(menu) => {
@@ -557,12 +530,13 @@ pub fn refresh_tray(app: &AppHandle) {
     }
 }
 
-fn build_tray(app: &AppHandle, config: &Config, hotkey: &str, paste_raw: &str) -> Result<()> {
-    let menu = tray_menu(app, config, hotkey, paste_raw)?;
+fn build_tray(app: &AppHandle, config: &Config, bindings: &Bindings) -> Result<()> {
+    let menu = tray_menu(app, config, bindings)?;
+    let hotkey = bindings.label(&Action::Record).unwrap_or_default();
 
     TrayIconBuilder::with_id("lathe")
         .icon(tray_image(tray::State::Idle))
-        .tooltip(tray::State::Idle.tooltip(hotkey))
+        .tooltip(tray::State::Idle.tooltip(&hotkey))
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
@@ -580,13 +554,14 @@ fn build_tray(app: &AppHandle, config: &Config, hotkey: &str, paste_raw: &str) -
                     update::open_release_page(&url);
                 }
             } else if let Some(code) = id.strip_prefix("language:") {
-                switch_language(app, code);
+                persist(app, &format!("language: {}", language_name(code)), |c| {
+                    c.languages.active = code.to_string();
+                });
                 refresh_tray(app);
             } else if let Some(name) = id.strip_prefix("preset:") {
-                if let Some(state) = app.try_state::<AppState>() {
-                    state.config.lock().unwrap().active_preset = name.to_string();
-                    eprintln!("active preset: {name}");
-                }
+                persist(app, &format!("active preset: {name}"), |c| {
+                    c.active_preset = name.to_string();
+                });
                 refresh_tray(app);
             }
         })
@@ -597,6 +572,16 @@ fn build_tray(app: &AppHandle, config: &Config, hotkey: &str, paste_raw: &str) -
 
 pub fn tray_image(state: tray::State) -> Image<'static> {
     Image::new_owned(tray::icon_rgba(state), tray::ICON_SIZE, tray::ICON_SIZE)
+}
+
+/// Opens settings on a particular section. The window asks for it once loaded, or
+/// on the event if it is already open.
+pub fn open_settings_at(app: &AppHandle, section: &'static str) {
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.open_at.lock().unwrap() = Some(section);
+    }
+    open_settings(app);
+    let _ = app.emit_to("settings", "show-section", ());
 }
 
 /// Brief section 3: created only when asked for, and destroyed on close. This is the
@@ -641,20 +626,30 @@ fn watch_config(
         for result in reloads {
             match result {
                 Ok(reloaded) => {
-                    let mut current = config.lock().unwrap();
-                    let hotkey_changed = current.hotkey != reloaded.hotkey
-                        || current.paste_raw_hotkey != reloaded.paste_raw_hotkey;
-                    // The bindings themselves still need a restart, but the press style
-                    // is read live by the state machine.
+                    // The listener reads the bindings and the press style live, so a
+                    // hotkey change lands without a restart. An unparseable main
+                    // binding keeps the old one rather than leaving the app deaf.
+                    match bindings_for(&reloaded) {
+                        Ok(list) => {
+                            if let Some(bindings) = state_bindings(&app) {
+                                if bindings.set(list) {
+                                    eprintln!(
+                                        "hotkey: now {}",
+                                        bindings.label(&Action::Record).unwrap_or_default()
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("hotkey unusable, keeping the old one: {e:#}");
+                            notify_user("Lathe: hotkey", &format!("{e:#}"));
+                        }
+                    }
                     *hotkey_mode.lock().unwrap() = reloaded.hotkey_mode;
-                    *current = reloaded;
-                    drop(current);
+                    *config.lock().unwrap() = reloaded;
                     eprintln!("config reloaded");
                     refresh_tray(&app);
                     let _ = app.emit_to("settings", "config-reloaded", ());
-                    if hotkey_changed {
-                        notify_user("Lathe", "Hotkey change needs a restart to take effect.");
-                    }
                 }
                 Err(e) => {
                     eprintln!("config reload failed: {e}");
@@ -663,6 +658,46 @@ fn watch_config(
             }
         }
     });
+}
+
+fn state_bindings(app: &AppHandle) -> Option<Bindings> {
+    app.try_state::<AppState>().map(|s| s.bindings.clone())
+}
+
+/// Brief 5.1 and 5.3: the main binding, the paste-raw binding, and one optional
+/// binding per preset. A preset with an unparseable hotkey is reported and skipped
+/// rather than taking the whole app down over a typo in a config file.
+fn bindings_for(config: &Config) -> Result<Vec<Bound>> {
+    let mut bindings = vec![Bound {
+        binding: Binding::parse(&config.hotkey)?,
+        action: Action::Record,
+    }];
+
+    // Optional. An empty or unparseable paste-raw binding means "not bound", not a
+    // reason to refuse to start: losing a convenience should never cost the whole app.
+    match config.paste_raw_hotkey.trim() {
+        "" => {}
+        spec => match Binding::parse(spec) {
+            Ok(binding) => bindings.push(Bound {
+                binding,
+                action: Action::PasteRaw,
+            }),
+            Err(e) => eprintln!("paste-raw hotkey unusable, leaving it unbound: {e:#}"),
+        },
+    }
+    for preset in &config.presets {
+        let Some(spec) = preset.hotkey.as_deref().filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        match Binding::parse(spec) {
+            Ok(binding) => bindings.push(Bound {
+                binding,
+                action: Action::RecordPreset(preset.name.clone()),
+            }),
+            Err(e) => eprintln!("preset '{}' has an unusable hotkey: {e:#}", preset.name),
+        }
+    }
+    Ok(bindings)
 }
 
 #[cfg(windows)]
