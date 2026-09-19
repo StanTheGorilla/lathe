@@ -165,31 +165,33 @@
   </nav>
 
   <main class="pane">
-    {#if error}
-      <div class="status bad">{error}</div>
-    {/if}
-
-    {#if config}
-      <Current bind:config onchange={touched} />
-
-      {#if dirty}
-        <div class="savebar">
-          <button class="primary" onclick={save} disabled={saving}>
-            {saving ? "Saving" : "Save changes"}
-          </button>
-          <button onclick={revert} disabled={saving}>Revert</button>
-          <span class="hint" style="margin:0">
-            {#if stale}
-              The file changed outside this window since you started editing. Saving
-              overwrites that; Revert loads it.
-            {:else}
-              The core reloads the file automatically.
-            {/if}
-          </span>
-        </div>
+    <div class="pane-scroll">
+      {#if error}
+        <div class="status bad">{error}</div>
       {/if}
-    {:else if !error}
-      <p class="subtitle">Loading configuration.</p>
+
+      {#if config}
+        <Current bind:config onchange={touched} />
+      {:else if !error}
+        <p class="subtitle">Loading configuration.</p>
+      {/if}
+    </div>
+
+    {#if dirty}
+      <div class="savebar">
+        <button class="primary" onclick={save} disabled={saving}>
+          {saving ? "Saving" : "Save changes"}
+        </button>
+        <button onclick={revert} disabled={saving}>Revert</button>
+        <span class="hint" style="margin:0">
+          {#if stale}
+            The file changed outside this window since you started editing. Saving
+            overwrites that; Revert loads it.
+          {:else}
+            The core reloads the file automatically.
+          {/if}
+        </span>
+      </div>
     {/if}
   </main>
 </div>

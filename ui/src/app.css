@@ -19,6 +19,7 @@
 
   --radius: 4px;
   --rail-width: 168px;
+  --content-width: 560px;
 
   /* Native, not web. Segoe UI Variable is the Windows 11 UI face. */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -123,9 +124,24 @@ body {
   font-size: 11px;
 }
 
+/* The pane is a column: the scrolling content, then the save bar as a real footer, so
+   nothing can slide underneath it. */
 .pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pane-scroll {
+  flex: 1;
+  min-height: 0;
   padding: 24px;
   overflow-y: auto;
+}
+
+/* Everything in a section shares one column width: fields, notices, tables, cards. */
+.pane-scroll > * {
+  max-width: var(--content-width);
 }
 
 h1 {
@@ -138,7 +154,6 @@ h1 {
 .subtitle {
   margin: 0 0 22px;
   color: var(--text-dim);
-  max-width: 62ch;
 }
 
 h2 {
@@ -153,7 +168,6 @@ h2 {
 /* Labels sit above their controls, left aligned, never beside. */
 .field {
   margin-bottom: 18px;
-  max-width: 460px;
 }
 
 .field > label {
@@ -180,6 +194,11 @@ textarea {
   color: var(--text);
   font: inherit;
   transition: border-color 120ms;
+}
+
+/* A number is a few characters; the box says so. */
+input[type="number"] {
+  width: 120px;
 }
 
 textarea {
@@ -359,9 +378,7 @@ th {
 }
 
 .savebar {
-  position: sticky;
-  bottom: 0;
-  margin: 24px -24px -24px;
+  flex: none;
   padding: 12px 24px;
   border-top: 1px solid var(--border);
   background: var(--surface);

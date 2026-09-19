@@ -204,7 +204,6 @@
     value={preset.name}
     oninput={(e) => rename(e.currentTarget.value)}
   />
-  <span class="spacer"></span>
   <button onclick={() => addPreset(preset)}>Clone</button>
   <button onclick={removePreset} disabled={config.presets.length <= 1}>
     Delete this preset
@@ -375,7 +374,7 @@
   line break.
 </p>
 
-<div class="field" style="max-width:100%">
+<div class="field">
   <label for="rules">Rules ({preset.replacements.length})</label>
   <textarea id="rules" style="min-height:90px" onchange={(e) => setRules(e.currentTarget.value)}
     >{rulesText(preset.replacements)}</textarea
@@ -387,15 +386,10 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: 640px;
     margin-bottom: 14px;
   }
 
   .set-name {
     width: 180px;
-  }
-
-  .spacer {
-    flex: 1;
   }
 </style>

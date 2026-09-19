@@ -148,7 +148,7 @@
 <div class="preset-tabs">
   {#each config.vocabulary.sets as s, i}
     <button aria-pressed={index === i} onclick={() => (index = i)}>
-      {s.name} <span class="count">{s.terms.length}</span>{s.enabled ? "" : " · off"}
+      {s.name} <span class="count">{s.terms.length}{#if !s.enabled} &middot; off{/if}</span>
     </button>
   {/each}
   <button onclick={addSet}>+ New set</button>
@@ -172,7 +172,6 @@
       />
       <span>Use this set</span>
     </label>
-    <span class="spacer"></span>
     <button aria-pressed={editing} onclick={() => (editing = !editing)}>
       {editing ? "Done" : "Edit"}
     </button>
@@ -340,7 +339,6 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: 640px;
     margin-bottom: 14px;
   }
 
@@ -352,17 +350,20 @@
     width: 180px;
   }
 
-  .spacer {
-    flex: 1;
-  }
-
   .terms {
-    max-width: 640px;
     margin-bottom: 8px;
   }
 
-  .terms th:first-child,
-  .terms td:first-child {
+  /* Read: the word column hugs its content. Edit: two inputs share the row. */
+  .terms:not(.editing) th:first-child,
+  .terms:not(.editing) td:first-child {
+    width: 1%;
+    white-space: nowrap;
+    padding-right: 40px;
+  }
+
+  .terms.editing th:first-child,
+  .terms.editing td:first-child {
     width: 40%;
   }
 

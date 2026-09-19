@@ -103,6 +103,11 @@
   </div>
 {/each}
 
+<p class="subtitle">
+  One binding does both styles. A tap shorter than the threshold latches recording on
+  until you tap again; holding it longer records only while held.
+</p>
+
 <div class="status info">
   <strong>Press a Lathe hotkey now.</strong> Whatever it receives appears here, so you can
   confirm which binding a key actually triggers.
@@ -110,10 +115,6 @@
     {seen ? seen[0] + "  ->  " + seen[1] : "nothing received yet"}
   </p>
 </div>
-<p class="subtitle">
-  One binding does both styles. A tap shorter than the threshold latches recording on
-  until you tap again; holding it longer records only while held.
-</p>
 
 {#if conflict}
   <div class="status bad">{conflict}</div>

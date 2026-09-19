@@ -148,7 +148,7 @@
 
 <h2>Transcripts</h2>
 
-<div class="field" style="max-width:100%">
+<div class="field">
   <label for="search">Search</label>
   <div class="row">
     <input
@@ -173,9 +173,13 @@
         <span class="mono">{item.asr_ms + item.cleanup_ms} ms</span>
         <span class="history-actions">
           <button onclick={() => paste(item.id, false)}>Paste</button>
-          {#if item.raw !== item.cleaned}
-            <button onclick={() => paste(item.id, true)}>Paste raw</button>
-          {/if}
+          <button
+            onclick={() => paste(item.id, true)}
+            class:blank={item.raw === item.cleaned}
+            disabled={item.raw === item.cleaned}
+          >
+            Paste raw
+          </button>
           <button onclick={() => (editing === item.id ? (editing = null) : edit(item))}>
             {editing === item.id ? "Cancel" : "Edit"}
           </button>
@@ -281,6 +285,10 @@
   .history-actions button {
     padding: 2px 8px;
     font-size: 12px;
+  }
+  /* Keeps its slot when raw and cleaned are the same, so Edit lines up down the list. */
+  .history-actions .blank {
+    visibility: hidden;
   }
   .history-text {
     margin: 0;

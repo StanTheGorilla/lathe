@@ -392,7 +392,7 @@
     onchange={(e) => { config.models.gpu_device = +e.currentTarget.value; onchange(); }}
   >
     <option value={-1}>
-      Automatic{#if adapters.some((a) => a.preferred)} ({adapters.find((a) => a.preferred).name}){/if}
+      Automatic{#if adapters.some((a) => a.preferred)}&nbsp;({adapters.find((a) => a.preferred).name}){/if}
     </option>
     {#each adapters as a}
       <option value={a.id}>{a.name} -- {a.kind}, {mb(a.vram_total)} MB</option>
