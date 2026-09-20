@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "lathe"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "lathe-core",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-spike"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",
