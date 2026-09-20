@@ -171,7 +171,12 @@
       {/if}
 
       {#if config}
-        <Current bind:config onchange={touched} />
+        <!-- Revert and a reload from the tray replace the whole config. A section keeps
+             its own place in a list (which preset, which set); remount it so that place
+             cannot point past the end of a list that just got shorter. -->
+        {#key config}
+          <Current bind:config onchange={touched} />
+        {/key}
       {:else if !error}
         <p class="subtitle">Loading configuration.</p>
       {/if}
