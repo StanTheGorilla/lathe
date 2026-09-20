@@ -165,7 +165,7 @@
   <p class="hint">{search ? "Nothing matches." : "Nothing recorded yet."}</p>
 {:else}
   {#each items as item}
-    <div class="history-item">
+    <div class="history-item wide">
       <div class="history-meta">
         <span>{when(item.at)}</span>
         <span>{item.preset}{item.language ? " · " + item.language : ""}</span>

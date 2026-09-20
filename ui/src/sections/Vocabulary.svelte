@@ -21,6 +21,7 @@
   // A set is read-only until Edit is pressed, so a stray keystroke cannot change a
   // list that is mostly looked at. Switching sets locks again.
   let editing = $state(false);
+  let showAdvanced = $state(false);
   let lockedIndex = $state(-1);
   $effect(() => {
     if (lockedIndex !== index) {
@@ -193,7 +194,7 @@
     </p>
   {/if}
 
-  <table class="terms" class:editing>
+  <table class="terms wide" class:editing>
     <thead>
       <tr>
         <th>Word</th>
@@ -274,9 +275,21 @@
   </p>
 {/if}
 
-<h2>Advanced</h2>
+<button
+  class="disclose"
+  style="margin-top:26px"
+  aria-expanded={showAdvanced}
+  onclick={() => (showAdvanced = !showAdvanced)}
+>
+  {showAdvanced ? "Hide" : "Show"} advanced
+  <span class="hint">
+    Correction {config.vocabulary.correction_enabled ? "on" : "off"}, threshold
+    {config.vocabulary.max_distance_ratio}
+  </span>
+</button>
 
-<label class="check">
+{#if showAdvanced}
+<label class="check" style="margin-top:14px">
   <input
     type="checkbox"
     checked={config.vocabulary.correction_enabled}
@@ -328,6 +341,7 @@
     active; the first 128 are sent.
   </p>
 </div>
+{/if}
 
 <style>
   .count {
@@ -384,18 +398,6 @@
 
   .terms tr.add td {
     padding-top: 10px;
-  }
-
-  .quiet {
-    padding: 4px 8px;
-    background: none;
-    border-color: transparent;
-    color: var(--text-dim);
-  }
-
-  .quiet:hover:not(:disabled) {
-    color: var(--clay);
-    border-color: transparent;
   }
 
   .dim {

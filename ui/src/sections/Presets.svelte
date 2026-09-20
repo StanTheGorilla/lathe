@@ -3,6 +3,8 @@
 
   let index = $state(0);
   const preset = $derived(config.presets[index]);
+  let showAdvanced = $state(false);
+  let confirmingDelete = $state(false);
 
   // Brief 5.4: four stops, because the model has four trained values, not a 0-100 bucketed
   // internally. The examples below are real S1-mini output for one fixed input, not
@@ -88,6 +90,7 @@
   }
 
   function removePreset() {
+    confirmingDelete = false;
     const was = preset.name;
     config.presets = config.presets.filter((_, i) => i !== index);
     index = Math.max(0, index - 1);
@@ -112,8 +115,6 @@
     }
     onchange();
   }
-
-  const langName = (code) => LANGUAGES.find((l) => l.code === code)?.name ?? code;
 
   // Rules round-trip through one line of text each. A real newline in a replacement is
   // shown as a literal \n, since the editor is line-based and a rule cannot span lines.
@@ -149,246 +150,268 @@
 <h1>Presets</h1>
 <p class="subtitle">
   A preset says how the text should come out: the three cleanup settings and whether
-  cleanup runs at all. The language you are speaking is separate, below. Both are switched
+  cleanup runs at all. The language you are speaking is separate. Both are switched
   from the tray menu.
 </p>
 
 <h2>Language</h2>
-<div class="field">
-  <label for="lang-main">Main language</label>
-  <select
-    id="lang-main"
-    value={config.languages.main}
-    onchange={(e) => setLanguage("main", e.currentTarget.value)}
-  >
-    {#each LANGUAGES as l}
-      <option value={l.code}>{l.name}</option>
-    {/each}
-  </select>
+<div class="row" style="align-items:flex-start">
+  <div class="field" style="flex:1">
+    <label for="lang-main">Main language</label>
+    <select
+      id="lang-main"
+      value={config.languages.main}
+      onchange={(e) => setLanguage("main", e.currentTarget.value)}
+    >
+      {#each LANGUAGES as l}
+        <option value={l.code}>{l.name}</option>
+      {/each}
+    </select>
+  </div>
+  <div class="field" style="flex:1">
+    <label for="lang-secondary">Second language</label>
+    <select
+      id="lang-secondary"
+      value={config.languages.secondary}
+      onchange={(e) => setLanguage("secondary", e.currentTarget.value)}
+    >
+      <option value="">None</option>
+      {#each LANGUAGES as l}
+        <option value={l.code}>{l.name}</option>
+      {/each}
+    </select>
+  </div>
 </div>
-<div class="field">
-  <label for="lang-secondary">Second language</label>
-  <select
-    id="lang-secondary"
-    value={config.languages.secondary}
-    onchange={(e) => setLanguage("secondary", e.currentTarget.value)}
-  >
-    <option value="">None</option>
-    {#each LANGUAGES as l}
-      <option value={l.code}>{l.name}</option>
-    {/each}
-  </select>
-  <p class="hint">
-    The tray menu shows the language in use and one item to switch to the other.
-    Currently dictating in {langName(config.languages.active || config.languages.main)}.
-    English is cleaned by S1-mini, built for exactly this job; anything else by the
-    multilingual model, a separate download under Models — without it the text is still
-    recognised but pasted uncleaned.
-  </p>
-</div>
+<p class="hint" style="margin:-8px 0 0">
+  English is cleaned by S1-mini; anything else needs the multilingual model, under Models.
+</p>
 
 <h2>Preset</h2>
 
 <div class="preset-tabs">
   {#each config.presets as p, i}
-    <button aria-pressed={index === i} onclick={() => (index = i)}>{p.name}</button>
+    <button aria-pressed={index === i} onclick={() => { index = i; confirmingDelete = false; }}>
+      {p.name}
+    </button>
   {/each}
   <button onclick={() => addPreset(null)}>+ New preset</button>
 </div>
 
-<div class="set-bar">
-  <input
-    class="mono set-name"
-    type="text"
-    aria-label="Preset name"
-    value={preset.name}
-    oninput={(e) => rename(e.currentTarget.value)}
-  />
-  <button onclick={() => addPreset(preset)}>Clone</button>
-  <button onclick={removePreset} disabled={config.presets.length <= 1}>
-    Delete this preset
-  </button>
+<div class="field">
+  <label for="preset-name">Name</label>
+  <div class="row">
+    <input
+      class="mono set-name"
+      id="preset-name"
+      type="text"
+      value={preset.name}
+      oninput={(e) => rename(e.currentTarget.value)}
+    />
+    <button class="quiet icon" data-tip="Clone this preset" aria-label="Clone this preset" onclick={() => addPreset(preset)}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect width="14" height="14" x="8" y="8" rx="2" />
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+      </svg>
+    </button>
+    <button
+      class="quiet icon"
+      data-tip="Delete this preset"
+      aria-label="Delete this preset"
+      onclick={() => (confirmingDelete = true)}
+      disabled={config.presets.length <= 1}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />
+      </svg>
+    </button>
+  </div>
 </div>
+
+{#if confirmingDelete}
+  <div class="status bad">
+    Delete the &ldquo;{preset.name}&rdquo; preset? Its hotkey and replacement rules go
+    with it. Revert at the bottom undoes it until you save.
+    <div class="row" style="margin-top:8px">
+      <button class="primary" onclick={removePreset}>Delete</button>
+      <button onclick={() => (confirmingDelete = false)}>Cancel</button>
+    </div>
+  </div>
+{/if}
 
 {#if nameClash}
   <div class="status bad">{nameClash}</div>
 {/if}
 
-{#if preset.name === "Prompt" && preset.rewrite === "off"}
-  <div class="status info">
-    Cleanup punctuates and removes fillers. It does not restructure rambling into a
-    well-formed prompt; the Rewrite setting below does, with the multilingual model.
-  </div>
-{/if}
+<div class="row" style="gap:24px">
+  <label class="check">
+    <input
+      type="checkbox"
+      checked={preset.cleanup}
+      onchange={(e) => set("cleanup", e.currentTarget.checked)}
+    />
+    <span>Run the cleanup model</span>
+  </label>
+  <label class="check">
+    <input
+      type="checkbox"
+      checked={preset.auto_paste}
+      onchange={(e) => set("auto_paste", e.currentTarget.checked)}
+    />
+    <span>Paste automatically</span>
+  </label>
+</div>
 
 {#if !preset.cleanup}
-  <div class="status info">
+  <div class="status info" style="margin-top:8px">
     This preset bypasses the cleanup model entirely. You get raw speech recognition.
+  </div>
+{:else}
+  <div class="field" style="margin-top:8px">
+    <label for="tone">Tone</label>
+    <div class="stops" id="tone">
+      {#each STOPS as stop}
+        <button aria-pressed={preset.styling === stop} onclick={() => set("styling", stop)}>
+          {stop}
+        </button>
+      {/each}
+    </div>
+    <p class="example">{EXAMPLES[preset.styling]}</p>
+    <p class="hint">
+      Spoken: &ldquo;{SOURCE}&rdquo;. The two formal stops often produce identical output on
+      short input.
+    </p>
+  </div>
+
+  <div class="field">
+    <label for="structure">Structure</label>
+    <select
+      id="structure"
+      value={preset.structure}
+      disabled={preset.rewrite !== "off"}
+      onchange={(e) => set("structure", e.currentTarget.value)}
+    >
+      <option value="prose">prose</option>
+      <option value="lists">lists</option>
+    </select>
+    <p class="hint">
+      {#if preset.rewrite !== "off"}
+        Not used while Rewrite is on.
+      {:else}
+        Lists only produces bullets when what you said actually contains items.
+      {/if}
+    </p>
+  </div>
+
+  <div class="field">
+    <label for="context">Context</label>
+    <select
+      id="context"
+      value={preset.context}
+      disabled={preset.rewrite !== "off"}
+      onchange={(e) => set("context", e.currentTarget.value)}
+    >
+      <option value="general">general</option>
+      <option value="email">email</option>
+    </select>
+    <p class="hint">
+      {#if preset.rewrite !== "off"}
+        Not used while Rewrite is on.
+      {:else}
+        Email adds a greeting, paragraph breaks and a sign-off.
+      {/if}
+    </p>
   </div>
 {/if}
 
-<div class="field">
-  <label for="tone">Tone</label>
-  <div class="stops" id="tone">
-    {#each STOPS as stop}
-      <button
-        aria-pressed={preset.styling === stop}
-        disabled={!preset.cleanup}
-        onclick={() => set("styling", stop)}
-      >
-        {stop}
-      </button>
-    {/each}
-  </div>
-  <p class="example">{EXAMPLES[preset.styling]}</p>
-  <p class="hint">
-    Spoken: &ldquo;{SOURCE}&rdquo;. The two formal stops often produce identical output on
-    short input.
-  </p>
-</div>
-
-<div class="field">
-  <label for="structure">Structure</label>
-  <select
-    id="structure"
-    value={preset.structure}
-    disabled={!preset.cleanup || preset.rewrite !== "off"}
-    onchange={(e) => set("structure", e.currentTarget.value)}
-  >
-    <option value="prose">prose</option>
-    <option value="lists">lists</option>
-  </select>
-  <p class="hint">
-    Lists only produces bullets when what you said actually contains items.
-  </p>
-</div>
-
-<div class="field">
-  <label for="context">Context</label>
-  <select
-    id="context"
-    value={preset.context}
-    disabled={!preset.cleanup || preset.rewrite !== "off"}
-    onchange={(e) => set("context", e.currentTarget.value)}
-  >
-    <option value="general">general</option>
-    <option value="email">email</option>
-  </select>
-  <p class="hint">Email adds a greeting, paragraph breaks and a sign-off.</p>
-</div>
-
-<div class="field">
-  <label for="rewrite">Rewrite</label>
-  <select
-    id="rewrite"
-    value={preset.rewrite ?? "off"}
-    disabled={!preset.cleanup}
-    onchange={(e) => set("rewrite", e.currentTarget.value)}
-  >
-    <option value="off">off -- keep every word</option>
-    <option value="prompt">prompt for an AI assistant</option>
-    <option value="notes">structured notes</option>
-    <option value="concise">the same thing in fewer words</option>
-  </select>
-  <p class="hint">
-    Off, the cleanup model may only fix punctuation and drop fillers. A rewrite is free to
-    change the words while keeping every point you made, and goes through the
-    multilingual model in every language, so S1-mini and the Structure and Context
-    settings above do not apply. Needs the multilingual model from Models; without it the
-    text is cleaned the ordinary way.
-  </p>
-</div>
-
-<h2>Behaviour</h2>
-
-<label class="check">
-  <input
-    type="checkbox"
-    checked={preset.cleanup}
-    onchange={(e) => set("cleanup", e.currentTarget.checked)}
-  />
-  <span>
-    Run the cleanup model
-    <span class="hint" style="margin:0">
-      English uses S1-mini; other languages use the multilingual model.
-    </span>
+<button
+  class="disclose"
+  style="margin-top:26px"
+  aria-expanded={showAdvanced}
+  onclick={() => (showAdvanced = !showAdvanced)}
+>
+  {showAdvanced ? "Hide" : "Show"} advanced
+  <span class="hint">
+    {#if preset.cleanup}Rewrite {preset.rewrite ?? "off"},{/if}
+    {preset.vocabulary_sets.length === 0
+      ? "every vocabulary set"
+      : `${preset.vocabulary_sets.length} vocabulary set${preset.vocabulary_sets.length === 1 ? "" : "s"}`},
+    {preset.replacements.length} replacement rule{preset.replacements.length === 1 ? "" : "s"}
   </span>
-</label>
+</button>
 
-<label class="check">
-  <input
-    type="checkbox"
-    checked={preset.auto_paste}
-    onchange={(e) => set("auto_paste", e.currentTarget.checked)}
-  />
-  <span>
-    Paste automatically
-    <span class="hint" style="margin:0">
-      When off, the text only goes to the clipboard.
-    </span>
-  </span>
-</label>
-
-<h2>Vocabulary</h2>
-
-<div class="field">
-  <span class="pseudo-label">Sets this preset uses</span>
-  {#each config.vocabulary.sets as s}
-    <label class="check">
-      <input
-        type="checkbox"
-        checked={preset.vocabulary_sets.length === 0 || preset.vocabulary_sets.includes(s.name)}
-        disabled={preset.vocabulary_sets.length === 0}
-        onchange={(e) => {
-          const next = e.currentTarget.checked
-            ? [...preset.vocabulary_sets, s.name]
-            : preset.vocabulary_sets.filter((n) => n !== s.name);
-          set("vocabulary_sets", next);
-        }}
-      />
-      <span>{s.name}</span>
-    </label>
-  {/each}
-  {#if preset.vocabulary_sets.length === 0}
-    <p class="hint">
-      Every enabled set is used. <button
-        style="padding:2px 8px"
-        onclick={() => set("vocabulary_sets", config.vocabulary.sets.map((s) => s.name))}
-        >Choose specific sets</button
+{#if showAdvanced}
+  {#if preset.cleanup}
+    <div class="field" style="margin-top:14px">
+      <label for="rewrite">Rewrite</label>
+      <select
+        id="rewrite"
+        value={preset.rewrite ?? "off"}
+        onchange={(e) => set("rewrite", e.currentTarget.value)}
       >
-    </p>
-  {:else}
-    <p class="hint">
-      <button style="padding:2px 8px" onclick={() => set("vocabulary_sets", [])}>
-        Use every enabled set
-      </button>
-    </p>
+        <option value="off">off -- keep every word</option>
+        <option value="prompt">prompt for an AI assistant</option>
+        <option value="notes">structured notes</option>
+        <option value="concise">the same thing in fewer words</option>
+      </select>
+      <p class="hint">
+        Off, the cleanup model may only fix punctuation and drop fillers. A rewrite is free
+        to change the words while keeping every point you made, and goes through the
+        multilingual model in every language, so S1-mini and the Structure and Context
+        settings above do not apply. Needs the multilingual model from Models; without it
+        the text is cleaned the ordinary way.
+      </p>
+    </div>
   {/if}
-</div>
 
-<h2>Replacements</h2>
-<p class="hint" style="margin-bottom:10px">
-  Applied last, after cleanup. Deterministic, no model involved. One per line as
-  <span class="mono">find =&gt; replace</span>; prefix with <span class="mono">re:</span>
-  to treat the left side as a regular expression. Use <span class="mono">\n</span> for a
-  line break.
-</p>
+  <div class="field" style="margin-top:14px">
+    <span class="pseudo-label">Vocabulary sets</span>
+    {#if preset.vocabulary_sets.length === 0}
+      <p class="hint" style="margin:0">
+        Every enabled set. <button
+          style="padding:2px 8px"
+          onclick={() => set("vocabulary_sets", config.vocabulary.sets.map((s) => s.name))}
+          >Choose sets</button
+        >
+      </p>
+    {:else}
+      {#each config.vocabulary.sets as s}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={preset.vocabulary_sets.includes(s.name)}
+            onchange={(e) => {
+              const next = e.currentTarget.checked
+                ? [...preset.vocabulary_sets, s.name]
+                : preset.vocabulary_sets.filter((n) => n !== s.name);
+              set("vocabulary_sets", next);
+            }}
+          />
+          <span>{s.name}</span>
+        </label>
+      {/each}
+      <p class="hint">
+        <button style="padding:2px 8px" onclick={() => set("vocabulary_sets", [])}>
+          Use every enabled set
+        </button>
+      </p>
+    {/if}
+  </div>
 
-<div class="field">
-  <label for="rules">Rules ({preset.replacements.length})</label>
-  <textarea id="rules" style="min-height:90px" onchange={(e) => setRules(e.currentTarget.value)}
-    >{rulesText(preset.replacements)}</textarea
-  >
-</div>
+  <div class="field">
+    <label for="rules">Replacement rules ({preset.replacements.length})</label>
+    <textarea id="rules" style="min-height:90px" onchange={(e) => setRules(e.currentTarget.value)}
+      >{rulesText(preset.replacements)}</textarea
+    >
+    <p class="hint">
+      Applied last, after cleanup. Deterministic, no model involved. One per line as
+      <span class="mono">find =&gt; replace</span>; prefix with <span class="mono">re:</span>
+      to treat the left side as a regular expression. Use <span class="mono">\n</span> for a
+      line break.
+    </p>
+  </div>
+{/if}
 
 <style>
-  .set-bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 14px;
-  }
-
   .set-name {
     width: 180px;
   }

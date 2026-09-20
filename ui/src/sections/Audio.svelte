@@ -74,8 +74,7 @@
 
 <div class="field">
   <span class="pseudo-label">Input level</span>
-  <div class="meter"><div style="width:{width}%"></div></div>
-  <div class="row" style="margin-top:8px">
+  <div class="row">
     <button onclick={() => (metering ? stop() : start())}>
       {metering ? "Stop meter" : "Start meter"}
     </button>
@@ -83,6 +82,7 @@
       {metering ? `peak ${level.peak_db.toFixed(1)} dBFS` : "not running"}
     </span>
   </div>
+  <div class="meter" style="margin-top:8px"><div style="width:{width}%"></div></div>
   <p class="hint">Aim for peaks between -18 and -6 dBFS while speaking normally.</p>
 </div>
 

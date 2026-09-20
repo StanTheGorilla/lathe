@@ -24,6 +24,8 @@
   let available = $state([]);
   let progress = $state(null);
   let showFiles = $state(false);
+  // The slot whose menu of alternatives is open, by config field; one at a time.
+  let openSlot = $state(null);
   let poll = null;
   let movePlan = $state(null);
   let movingTo = $state("");
@@ -252,41 +254,98 @@
 
 {#if error}<div class="status bad">{error}</div>{/if}
 
+<svelte:window
+  onmousedown={(e) => openSlot && !e.target.closest(".picker") && (openSlot = null)}
+  onkeydown={(e) => e.key === "Escape" && (openSlot = null)}
+/>
+
+{#snippet card(field, o, onpick)}
+  {@const chosen = config.models[field] === o.file}
+  {@const have = present(o.file)}
+  {@const downloading = progress && progress.file === o.file && !progress.finished}
+  <div class="choice" class:picked={chosen}>
+    <button
+      class="choice-pick"
+      aria-pressed={chosen}
+      onclick={() => { choose(field, o.file); onpick?.(); }}
+      disabled={!have && !chosen}
+    >
+      <span class="choice-head">
+        <span class="choice-name">{o.label}</span>
+        <span class="choice-size mono">{o.size}</span>
+      </span>
+      <span class="choice-note">{o.note}</span>
+    </button>
+    {#if !have}
+      <p class="choice-missing">
+        {downloading ? `Downloading -- ${pct(progress)}%` : "Not downloaded."}
+        <button class="inline" disabled={busy} onclick={() => download(o.file)}>
+          {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : failed(o.file) ? "Try again" : "Get it"}
+        </button>
+      </p>
+      {#if failed(o.file)}
+        <p class="choice-missing" style="color:var(--clay)">{progress.error}</p>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
+<!-- A slot shows the model in use as a picker: the card opens a menu of the others
+     under it. A config that names a file not listed here has nothing to show on its
+     own, so it lists them all. -->
 {#snippet slot(title, field, options, subtitle)}
+  {@const picked = options.find((o) => o.file === config.models[field])}
+  {@const others = options.filter((o) => o !== picked)}
+  {@const open = openSlot === field}
   <h2>{title}</h2>
   <p class="hint" style="margin:-6px 0 10px">{subtitle}</p>
-  <div class="choices">
-    {#each options as o}
-      {@const chosen = config.models[field] === o.file}
-      {@const have = present(o.file)}
-      {@const downloading = progress && progress.file === o.file && !progress.finished}
-      <div class="choice" class:picked={chosen}>
+  {#if picked}
+    {@const have = present(picked.file)}
+    {@const downloading = progress && progress.file === picked.file && !progress.finished}
+    <div class="picker">
+      <div class="choice picked">
         <button
           class="choice-pick"
-          aria-pressed={chosen}
-          onclick={() => choose(field, o.file)}
-          disabled={!have && !chosen}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onclick={() => (openSlot = open ? null : field)}
         >
           <span class="choice-head">
-            <span class="choice-name">{o.label}</span>
-            <span class="choice-size mono">{o.size}</span>
+            <span class="choice-name">{picked.label}</span>
+            <span class="choice-size mono">{picked.size}</span>
+            <svg class="chevron" class:open viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </span>
-          <span class="choice-note">{o.note}</span>
+          <span class="choice-note">{picked.note}</span>
         </button>
         {#if !have}
           <p class="choice-missing">
             {downloading ? `Downloading -- ${pct(progress)}%` : "Not downloaded."}
-            <button class="inline" disabled={busy} onclick={() => download(o.file)}>
-              {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : failed(o.file) ? "Try again" : "Get it"}
+            <button class="inline" disabled={busy} onclick={() => download(picked.file)}>
+              {downloading ? `${mb(progress.done)} of ${mb(progress.total)} MB` : failed(picked.file) ? "Try again" : "Get it"}
             </button>
           </p>
-          {#if failed(o.file)}
+          {#if failed(picked.file)}
             <p class="choice-missing" style="color:var(--clay)">{progress.error}</p>
           {/if}
         {/if}
       </div>
-    {/each}
-  </div>
+      {#if open}
+        <div class="menu" role="listbox" aria-label="{title} alternatives">
+          {#each others as o}
+            {@render card(field, o, () => (openSlot = null))}
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {:else}
+    <div class="choices">
+      {#each options as o}
+        {@render card(field, o)}
+      {/each}
+    </div>
+  {/if}
 {/snippet}
 
 {@render slot(
@@ -363,7 +422,7 @@
 </button>
 
 {#if showFiles && status}
-  <table style="margin-top:10px">
+  <table class="wide" style="margin-top:10px">
     <thead>
       <tr><th>Role</th><th>File</th><th>Size</th><th>State</th></tr>
     </thead>
@@ -547,6 +606,45 @@
     margin-bottom: 8px;
   }
 
+  .picker {
+    position: relative;
+    margin-bottom: 8px;
+  }
+
+  /* The menu sits over whatever follows, like a native dropdown; a border is the only
+     edge it gets (brief section 8, no shadows). */
+  .menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .chevron {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    align-self: center;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 120ms;
+  }
+
+  .chevron.open {
+    transform: rotate(180deg);
+  }
+
   /* A card, not a button: the "Get it" control lives inside it, and a button nested in
      a button is invalid HTML whose clicks the disabled outer one swallows. */
   .choice {
@@ -581,6 +679,7 @@
   }
 
   .choice-name {
+    flex: 1;
     font-weight: 500;
   }
 
@@ -609,11 +708,5 @@
   .inline {
     padding: 1px 7px;
     font-size: 12px;
-  }
-
-  .disclose {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
   }
 </style>

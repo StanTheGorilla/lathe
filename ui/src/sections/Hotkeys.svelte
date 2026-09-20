@@ -9,6 +9,8 @@
   let autostartError = $state("");
   let seen = $state(null);
   let seenTimer = null;
+  let showPerPreset = $state(false);
+  const bound = $derived(config.presets.filter((p) => p.hotkey).length);
   // Which platform this is on decides the name of the Win/Cmd/Super key and the
   // advice below the binding.
   let os = $state({ os: "windows", super_key: "Win" });
@@ -220,8 +222,33 @@
   <p class="hint">A hard cap, so a stuck key cannot fill memory.</p>
 </div>
 
-<h2>Per preset</h2>
-<p class="hint" style="margin-bottom:10px">
+<h2>Startup</h2>
+
+<label class="check">
+  <input type="checkbox" checked={autostart} onchange={(e) => toggleAutostart(e.currentTarget.checked)} />
+  <span>
+    Start Lathe when I sign in
+    <span class="hint" style="margin:0">
+      Written to the current user's Run key. No elevation, nothing system-wide.
+    </span>
+  </span>
+</label>
+{#if autostartError}<div class="status bad" style="margin-top:8px">{autostartError}</div>{/if}
+
+<button
+  class="disclose"
+  style="margin-top:26px"
+  aria-expanded={showPerPreset}
+  onclick={() => (showPerPreset = !showPerPreset)}
+>
+  {showPerPreset ? "Hide" : "Show"} per-preset hotkeys
+  <span class="hint">
+    {bound === 0 ? "none bound" : `${bound} of ${config.presets.length} bound`}
+  </span>
+</button>
+
+{#if showPerPreset}
+<p class="hint" style="margin:14px 0 10px">
   An optional binding that dictates with one specific preset, whatever the tray has
   selected. Leave empty for none.
 </p>
@@ -263,16 +290,4 @@
     {/if}
   </div>
 {/each}
-
-<h2>Startup</h2>
-
-<label class="check">
-  <input type="checkbox" checked={autostart} onchange={(e) => toggleAutostart(e.currentTarget.checked)} />
-  <span>
-    Start Lathe when I sign in
-    <span class="hint" style="margin:0">
-      Written to the current user's Run key. No elevation, nothing system-wide.
-    </span>
-  </span>
-</label>
-{#if autostartError}<div class="status bad" style="margin-top:8px">{autostartError}</div>{/if}
+{/if}

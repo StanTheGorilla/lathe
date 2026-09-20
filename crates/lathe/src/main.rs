@@ -595,7 +595,7 @@ pub fn open_settings(app: &AppHandle) {
     }
     let built = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("Lathe")
-        .inner_size(960.0, 680.0)
+        .inner_size(1280.0, 800.0)
         .min_inner_size(840.0, 600.0)
         .resizable(true)
         .build();
@@ -603,8 +603,9 @@ pub fn open_settings(app: &AppHandle) {
     match built {
         Ok(window) => {
             // The builder's inner_size is not honoured here, so set it explicitly.
-            // Brief section 8 asked for roughly 720x560; that felt cramped in use.
-            let _ = window.set_size(tauri::LogicalSize::new(960.0, 680.0));
+            // Brief section 8 asked for roughly 720x560; that felt cramped in use, and
+            // so did 960x680 once the transcript and word lists were given room to grow.
+            let _ = window.set_size(tauri::LogicalSize::new(1280.0, 800.0));
             let _ = window.center();
             let _ = window.set_focus();
         }

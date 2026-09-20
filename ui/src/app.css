@@ -20,6 +20,7 @@
   --radius: 4px;
   --rail-width: 168px;
   --content-width: 560px;
+  --content-width-wide: 780px;
 
   /* Native, not web. Segoe UI Variable is the Windows 11 UI face. */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -140,9 +141,27 @@ body {
   overflow-y: auto;
 }
 
-/* Everything in a section shares one column width: fields, notices, tables, cards. */
+/* Everything in a section shares one column width: fields, notices, tables, cards.
+   Lists of the user's own text (transcripts, the word table, the file table) may take a
+   second, wider column, so a bigger window shows more of them; prose and inputs stay put. */
 .pane-scroll > * {
   max-width: var(--content-width);
+}
+
+.pane-scroll > .wide {
+  max-width: var(--content-width-wide);
+}
+
+/* A rarely needed group sits behind one line; the hint after the verb says what is in it
+   and where it stands, so nothing has to be opened just to check. */
+.disclose {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.disclose .hint {
+  margin: 0;
 }
 
 h1 {
@@ -273,6 +292,61 @@ button.primary {
 button:disabled {
   color: var(--ash);
   cursor: default;
+}
+
+/* A secondary action next to a field: reads as a link until hovered. */
+button.quiet {
+  padding: 4px 8px;
+  background: none;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+button.quiet:hover:not(:disabled) {
+  color: var(--clay);
+  border-color: transparent;
+}
+
+/* An action that is only a glyph; the tip says what it does, and at once, not after
+   the native title delay. */
+button.icon {
+  position: relative;
+  display: inline-flex;
+  padding: 4px;
+}
+
+button.icon[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms;
+}
+
+button.icon[data-tip]:hover::after,
+button.icon[data-tip]:focus-visible::after {
+  opacity: 1;
+}
+
+button.icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Brief 5.4: four stops, because the model has four trained values. */
