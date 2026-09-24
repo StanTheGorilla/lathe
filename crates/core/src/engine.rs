@@ -40,12 +40,16 @@ pub struct Engine {
     backend: Option<LlamaBackend>,
     asr: Option<Asr>,
     cleanup: Option<Cleanup>,
-    /// Loaded only when a non-English preset needs it. See amendment A21.
+    /// Loaded only when a non-English preset needs it. See amendment A21. Also serves
+    /// English when a general model was picked for English cleanup.
     cleanup_multilingual: Option<Cleanup>,
-    /// Set once the optional multilingual model has been looked for and was not there.
+    /// Which file `cleanup_multilingual` was loaded from. English and Polish may name
+    /// different instruction models, and switching must not keep the wrong one.
+    cleanup_multilingual_path: Option<std::path::PathBuf>,
+    /// The instruction model file last looked for and not found.
     /// Without it every non-English dictation would retry the load, and pay the warmup
     /// behind it, for a file that is still absent.
-    cleanup_multilingual_missing: bool,
+    cleanup_multilingual_missing: Option<std::path::PathBuf>,
     /// Resolved once per process. Enumerating adapters initialises the Vulkan backend,
     /// and the answer cannot change while the app is running.
     gpu: Option<crate::asr::Gpu>,
@@ -64,7 +68,8 @@ impl Engine {
             asr: None,
             cleanup: None,
             cleanup_multilingual: None,
-            cleanup_multilingual_missing: false,
+            cleanup_multilingual_path: None,
+            cleanup_multilingual_missing: None,
             gpu: None,
             spill_warning: None,
             last_used: Instant::now(),
@@ -100,6 +105,12 @@ impl Engine {
     pub fn wants_instruct(config: &Config, preset: &Preset) -> bool {
         !config.languages.current().eq_ignore_ascii_case("en")
             || (preset.cleanup && preset.rewrite != crate::cleanup::Rewrite::Off)
+            || config.english_uses_instruction_model()
+    }
+
+    /// Whether the resident instruction model is the file this dictation wants.
+    fn instruct_is(&self, config: &Config) -> bool {
+        self.cleanup_multilingual_path.as_deref() == Some(config.instruction_model_path().as_path())
     }
 
     /// Whether an English dictation also keeps the instruction model resident, to weigh
@@ -119,7 +130,8 @@ impl Engine {
         if self.asr.is_none() {
             return false;
         }
-        let instruct = self.cleanup_multilingual.is_some() || self.cleanup_multilingual_missing;
+        let instruct = (self.cleanup_multilingual.is_some() && self.instruct_is(config))
+            || self.cleanup_multilingual_missing.as_deref() == Some(config.instruction_model_path().as_path());
         if Self::wants_instruct(config, preset) {
             instruct
         } else {
@@ -161,6 +173,12 @@ impl Engine {
         if !english && self.cleanup.take().is_some() {
             eprintln!("s1-mini unloaded: switching to the instruction model ({language})");
         }
+        // English and another language may each name their own instruction model.
+        if self.cleanup_multilingual.is_some() && !self.instruct_is(config) {
+            self.cleanup_multilingual = None;
+            self.cleanup_multilingual_path = None;
+            eprintln!("instruction model unloaded: this language uses a different one");
+        }
 
         self.report_vram(config, english, judge);
 
@@ -187,7 +205,7 @@ impl Engine {
         }
 
         if (!english || judge) && self.cleanup_multilingual.is_none() {
-            let path = config.cleanup_multilingual_path();
+            let path = config.instruction_model_path();
             if path.exists() {
                 progress("Loading multilingual cleanup model");
                 let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
@@ -201,7 +219,8 @@ impl Engine {
                 )?;
                 eprintln!("multilingual cleanup model loaded in {ms}ms");
                 self.cleanup_multilingual = Some(cleanup);
-                self.cleanup_multilingual_missing = false;
+                self.cleanup_multilingual_path = Some(path.clone());
+                self.cleanup_multilingual_missing = None;
             } else {
                 // Not fatal. Recognition still works in this language; only the tidying
                 // is missing, and the model is an optional download.
@@ -210,11 +229,17 @@ impl Engine {
                      non-English dictation will be pasted uncleaned",
                     path.display()
                 );
-                self.cleanup_multilingual_missing = true;
+                self.cleanup_multilingual_missing = Some(path.clone());
                 // A rewrite preset in English can still be cleaned the ordinary way,
                 // which beats pasting raw speech because one optional file is absent.
                 // (A judge that is missing just leaves S1-mini to judge.)
-                if !judge && language.eq_ignore_ascii_case("en") && self.cleanup.is_none() {
+                // Nor when S1-mini is not what English was given: the English file is
+                // the one that is missing.
+                if !judge
+                    && language.eq_ignore_ascii_case("en")
+                    && !config.english_uses_instruction_model()
+                    && self.cleanup.is_none()
+                {
                     eprintln!("the rewrite needs that model; cleaning with S1-mini instead");
                     progress("Loading cleanup model");
                     let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
@@ -258,7 +283,7 @@ impl Engine {
             pending.push(config.cleanup_path());
         }
         if (!english || judge) && self.cleanup_multilingual.is_none() {
-            pending.push(config.cleanup_multilingual_path());
+            pending.push(config.instruction_model_path());
         }
         let needed: u64 = pending
             .iter()
@@ -331,8 +356,9 @@ impl Engine {
         self.asr = None;
         self.cleanup = None;
         self.cleanup_multilingual = None;
+        self.cleanup_multilingual_path = None;
         // Looked for again next time: the download may have finished in the meantime.
-        self.cleanup_multilingual_missing = false;
+        self.cleanup_multilingual_missing = None;
         eprintln!("models unloaded after idle timeout");
         true
     }
@@ -585,5 +611,24 @@ mod tests {
         config.vocabulary.context = true;
         config.languages.active = "pl".into();
         assert!(!Engine::judges_with_instruct(&config, &preset));
+    }
+
+    #[test]
+    fn a_general_model_picked_for_english_routes_english_through_it() {
+        let mut config = Config::default();
+        let preset = config.active().clone();
+        assert!(!Engine::wants_instruct(&config, &preset));
+        assert_eq!(config.instruction_model_path(), config.cleanup_multilingual_path());
+
+        config.models.cleanup = "gemma-4-E2B_q4_0-it.gguf".into();
+        assert!(Engine::wants_instruct(&config, &preset));
+        assert_eq!(config.instruction_model_path(), config.cleanup_path());
+        // Already the instruction model, so there is no second one to judge with.
+        config.vocabulary.context_with_instruction_model = true;
+        assert!(!Engine::judges_with_instruct(&config, &preset));
+
+        // Polish keeps its own model whatever English uses.
+        config.languages.active = "pl".into();
+        assert_eq!(config.instruction_model_path(), config.cleanup_multilingual_path());
     }
 }

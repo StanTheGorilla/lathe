@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "lathe"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "lathe-core",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-spike"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "lathe-text"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "regex",
  "rphonetic",
