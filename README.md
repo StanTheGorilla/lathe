@@ -85,12 +85,15 @@ Neither dropped content on 202 test inputs. Fourteen builds were measured to get
 the harness is `lathe-spike cleanup-eval` and `scripts/quant/`.
 
 The instruction-model slot, used for rewrite presets and languages other than English,
-also takes ChatML models: LFM2.5 1.2B and Qwen3.5 4B are offered beside Gemma, unmeasured
-until they have been through the same harness:
+also takes ChatML models. Measured on 47 English inputs of the cleanup set (CPU, so the
+times only compare): Gemma 4 E2B 4.8% WER, S1-mini 6.9% at a quarter of Gemma's time,
+Qwen3.5 4B 7.3% at twice Gemma's, and LFM2.5 1.2B 59.5% -- it answered with the prompt's
+rules -- so LFM2.5 is not offered. Settling "cloud" or "Claude" and the like, over 38
+sentences: Qwen3.5 38, Gemma 37, S1-mini 32, LFM2.5 32, with no wrong swap from any.
 
 ```powershell
 # General model against S1-mini on the English set, scored against the expected output.
-.\target\release\lathe-spike.exe --models models --cleanup-model LFM2.5-1.2B-Instruct-Q8_0.gguf cleanup-eval --instruct --against-clean --out lfm.jsonl
+.\target\release\lathe-spike.exe --models models --cleanup-model gemma-4-E2B_q4_0-it.gguf cleanup-eval --instruct --against-clean --out lfm.jsonl
 # How well a model settles "cloud" or "Claude", and which margin to use.
 .\target\release\lathe-spike.exe --models models --cleanup-model s1-mini-q8_0.gguf context-eval
 ```

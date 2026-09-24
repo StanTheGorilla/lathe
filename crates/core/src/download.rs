@@ -134,18 +134,11 @@ pub const KNOWN: &[Known] = &[
         approx_bytes: 2_530_000_000,
         required: false,
     },
-    // Instruction-model candidates from 2026, offered beside Gemma and not yet
-    // measured here: `lathe-spike cleanup-eval --instruct` and `context-eval
-    // --instruct` are how they earn a place. LFM2.5 is fast and small but names no
-    // Polish among its languages; Qwen3.5 lists 201.
-    Known {
-        file: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
-        label: "LFM2.5 1.2B Instruct Q8_0",
-        role: "Instruction model, alternative",
-        url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q8_0.gguf",
-        approx_bytes: 1_250_000_000,
-        required: false,
-    },
+    // Qwen3.5 4B, offered beside Gemma for its languages. Measured on 47 English
+    // cleanup-eval inputs (CPU): WER 7.3% against Gemma 4 E2B's 4.8% and S1-mini's
+    // 6.9%, at twice Gemma's time, and it settled all 38 context-eval sentences.
+    // LFM2.5 1.2B was tried and dropped: it answered with the prompt's rules instead
+    // of the cleaned text on several inputs, WER 59.5%.
     Known {
         file: "Qwen3.5-4B-Q4_K_M.gguf",
         label: "Qwen3.5 4B Q4_K_M",

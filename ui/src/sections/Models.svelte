@@ -111,15 +111,9 @@
       size: "3.85 GB",
     },
     {
-      file: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
-      label: "LFM2.5 1.2B Instruct  Q8_0",
-      note: "Not measured here yet. Small and fast, for rewrite presets in English; Polish is not among its listed languages.",
-      size: "1.25 GB",
-    },
-    {
       file: "Qwen3.5-4B-Q4_K_M.gguf",
       label: "Qwen3.5 4B  Q4_K_M",
-      note: "Not measured here yet. Lists 201 languages; larger than Gemma 4 E2B's graphics-memory share.",
+      note: "Lists 201 languages; not yet measured on Polish. In English it cleaned no better than S1-mini and about twice as slowly as Gemma 4 E2B, but settled every \u201ccloud or Claude\u201d in testing.",
       size: "2.74 GB",
     },
   ];
