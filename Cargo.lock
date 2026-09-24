@@ -2585,10 +2585,9 @@ dependencies = [
  "encoding_rs",
  "evdev",
  "hound",
+ "lathe-text",
  "llama-cpp-2",
  "notify",
- "regex",
- "rphonetic",
  "rubato",
  "rusqlite",
  "serde",
@@ -2610,6 +2609,17 @@ dependencies = [
  "llama-cpp-2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lathe-text"
+version = "0.1.14"
+dependencies = [
+ "regex",
+ "rphonetic",
+ "serde",
+ "strsim",
+ "toml 1.1.5+spec-1.1.0",
 ]
 
 [[package]]

@@ -1,8 +1,9 @@
 name: Check
 
-# The cheap check that runs on every push. The native stacks take close to an hour
-# across the three platforms (build.yml), so nothing there runs on push; this builds the
-# settings window alone, which is a minute and catches a broken commit in ui/.
+# The cheap checks that run on every push. The native stacks take close to an hour
+# across the three platforms (build.yml), so nothing there runs on push; these build the
+# settings window alone, and test the text passes that need no model or GPU. Each takes
+# about a minute and catches a broken commit in ui/ or crates/text.
 
 on:
   push:
@@ -22,3 +23,12 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
+
+  text:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Vocabulary correction and replacement rules. lathe-core needs the ggml stack
+      # before its own tests can build; this crate needs nothing.
+      - run: cargo test -p lathe-text

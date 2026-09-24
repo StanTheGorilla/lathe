@@ -18,7 +18,8 @@
 //   vocabulary term is its *exact phonetic twin* and within a small edit distance. That
 //   pairing is deliberately strict. "cohere" and "coherent" encode differently (KHR
 //   against KHRNT), so the pass leaves "coherent" alone -- which is exactly what the old
-//   explicit mapping got wrong.
+//   explicit mapping got wrong. Nor does it touch a word found in an English word list:
+//   twins within budget still include "rest" and "Rust".
 
 use rphonetic::{DoubleMetaphone, Encoder};
 use serde::{Deserialize, Serialize};
@@ -292,6 +293,13 @@ impl<'a> Corrector<'a> {
         if lower.chars().count() < 4 {
             return None;
         }
+        // A real English word is something the speaker may have said, so the inferred
+        // pass leaves it alone. Phonetic key plus edit distance alone turned "rest" into
+        // "Rust", "vote" into "Vite" and "branches" into "branch" on the default sets.
+        // A named spoken form, checked before this, is still allowed to claim one.
+        if is_english_word(&lower) {
+            return None;
+        }
 
         // rphonetic's Double Metaphone slices by byte offset and panics outright on a
         // multi-byte character, so nothing non-ASCII may reach it. Folding rather than
@@ -328,6 +336,22 @@ impl<'a> Corrector<'a> {
         }
         best.map(|(_, written)| written)
     }
+}
+
+/// Whether `lower` is an ordinary English word. Only lowercase entries are listed, so a
+/// proper noun such as "Vulcan" is not one, and "vulcan" can still become "Vulkan".
+fn is_english_word(lower: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    WORDS
+        .get_or_init(|| {
+            include_str!("english-words.txt")
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        })
+        .contains(lower)
 }
 
 /// Strips Latin diacritics so a word can be handed to the phonetic encoder.
@@ -536,7 +560,9 @@ pub fn apply_replacements(text: &str, rules: &[Replacement]) -> String {
         if rule.find.is_empty() {
             continue;
         }
-        if rule.regex {
+        if !rule.regex && is_layout_command(rule) {
+            out = apply_layout_command(&out, rule);
+        } else if rule.regex {
             match regex::Regex::new(&rule.find) {
                 Ok(re) => out = re.replace_all(&out, rule.replace.as_str()).into_owned(),
                 // A bad pattern is the user's typo, not a reason to lose the dictation.
@@ -547,6 +573,34 @@ pub fn apply_replacements(text: &str, rules: &[Replacement]) -> String {
         }
     }
     out
+}
+
+/// A literal rule that turns spoken words into nothing but line breaks or spacing:
+/// "new paragraph", "new line". Those are dictated commands rather than text, and
+/// they reach the rules after cleanup has already treated them as words.
+fn is_layout_command(rule: &Replacement) -> bool {
+    !rule.replace.is_empty()
+        && rule.replace.chars().all(char::is_whitespace)
+        && rule.find.chars().any(char::is_alphabetic)
+}
+
+/// Cleanup capitalises and punctuates a spoken command like any other words, so
+/// "new paragraph" comes back as "New paragraph." or ", new paragraph,". Matched
+/// ignoring case, as whole words, and taking the punctuation and spaces the cleanup
+/// put around it: a comma before it and anything after it belonged to the command.
+/// A full stop before it is the end of the previous sentence and stays.
+fn apply_layout_command(text: &str, rule: &Replacement) -> String {
+    let words: Vec<String> = rule.find.split_whitespace().map(regex::escape).collect();
+    let pattern = format!(
+        r"(?i)[ \t]*[,;:]?[ \t]*\b{}\b[,.;:!?]*[ \t]*",
+        words.join(r"[ \t]+")
+    );
+    match regex::Regex::new(&pattern) {
+        Ok(re) => re
+            .replace_all(text, regex::NoExpand(&rule.replace))
+            .into_owned(),
+        Err(_) => text.replace(&rule.find, &rule.replace),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,11 +775,91 @@ mod tests {
         assert_eq!(back.terms, set.terms);
     }
 
+    /// Ordinary words that the phonetic net used to rewrite on the default sets: each is
+    /// a twin of a term within the edit budget.
     #[test]
-    fn replacements_are_literal_by_default() {
+    fn leaves_english_words_that_sound_like_a_term_alone() {
+        for text in [
+            "I'll do the rest tomorrow.",
+            "Please vote for the committee.",
+            "It will be cloudy.",
+            "Both branches failed.",
+            "The lender said no.",
+        ] {
+            assert_eq!(vocab().correct(text), (text.to_string(), 0));
+        }
+    }
+
+    /// No word in the list is ever rewritten by the shipped vocabulary. Guards the
+    /// shipped spoken forms too: one of those that is itself English would eat it.
+    #[test]
+    fn the_default_vocabulary_rewrites_no_english_word() {
+        let words: Vec<&str> = include_str!("english-words.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect();
+        let (out, n) = vocab().correct(&words.join(" "));
+        let changed: Vec<_> = out
+            .split(' ')
+            .zip(&words)
+            .filter(|(a, b)| a != *b)
+            .take(10)
+            .collect();
+        assert_eq!(n, 0, "rewrote {changed:?}");
+    }
+
+    #[test]
+    fn a_spoken_form_still_wins_over_an_english_word() {
+        let vocab = Vocabulary {
+            sets: vec![Set {
+                name: "ai".into(),
+                enabled: true,
+                terms: vec![Term::heard("Claude", &["cloudy"])],
+            }],
+            ..Vocabulary::default()
+        };
+        assert_eq!(vocab.correct("ask cloudy").0, "ask Claude");
+    }
+
+    #[test]
+    fn layout_commands_work_on_raw_text() {
         let rules = default_replacements();
         let out = apply_replacements("first line new paragraph second line", &rules);
-        assert_eq!(out, "first line \n\n second line");
+        assert_eq!(out, "first line\n\nsecond line");
+    }
+
+    /// What cleanup hands the rules: the command capitalised and punctuated like any
+    /// other words.
+    #[test]
+    fn layout_commands_survive_cleanup_punctuation() {
+        let rules = default_replacements();
+        assert_eq!(
+            apply_replacements("First point. New paragraph. Second point.", &rules),
+            "First point.\n\nSecond point."
+        );
+        assert_eq!(
+            apply_replacements("Line one, new line, line two.", &rules),
+            "Line one\nline two."
+        );
+        assert_eq!(
+            apply_replacements("Done. New line", &rules),
+            "Done.\n"
+        );
+        // Whole words only.
+        assert_eq!(
+            apply_replacements("renew lines", &rules),
+            "renew lines"
+        );
+    }
+
+    #[test]
+    fn other_literal_rules_stay_exact() {
+        let rules = vec![Replacement {
+            find: "teh".into(),
+            replace: "the".into(),
+            regex: false,
+        }];
+        assert_eq!(apply_replacements("Teh cat and teh dog", &rules), "Teh cat and the dog");
     }
 
     #[test]

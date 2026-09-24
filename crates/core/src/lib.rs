@@ -15,4 +15,6 @@ pub mod history;
 pub mod hotkey;
 pub mod paste;
 pub mod update;
-pub mod vocabulary;
+// Moved to its own crate so its tests run without the native stack; re-exported so
+// every `crate::vocabulary` path keeps working.
+pub use lathe_text::vocabulary;

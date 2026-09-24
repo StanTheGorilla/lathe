@@ -341,7 +341,7 @@ impl Engine {
         // The VAD gate above still runs locally, so silence is never uploaded.
         let (text, asr_ms) = if config.remote_asr.enabled {
             let started = Instant::now();
-            match remote_transcribe(config, &gated.pcm, lang) {
+            match remote_transcribe(config, &gated.pcm, lang, &vocabulary.terms(64)) {
                 Ok(text) => (text, started.elapsed().as_millis()),
                 Err(e) if config.remote_asr.fallback_to_local => {
                     eprintln!("remote transcription failed, falling back to local: {e:#}");
@@ -456,7 +456,7 @@ impl Engine {
 /// Brief 4.3. Builds the backend per call rather than holding it: it owns no model and
 /// no connection, so there is nothing to keep warm, and reading the config each time
 /// means an endpoint change takes effect on the next dictation like every other setting.
-fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str) -> Result<String> {
+fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str, hints: &[String]) -> Result<String> {
     use crate::asr_backend::{AsrBackend, OpenAiCompatBackend};
 
     let remote = &config.remote_asr;
@@ -470,7 +470,10 @@ fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str) -> Result<String>
         Some(remote.api_key.clone()),
         remote.timeout_secs,
     );
-    backend.transcribe(pcm, lang, &[])
+    // The vocabulary goes out as the request's `prompt`, which is the only way to bias
+    // a remote recogniser. Capped like the local list: a Whisper-style prompt keeps
+    // only its last 224 tokens.
+    backend.transcribe(pcm, lang, hints)
 }
 
 /// The English name of a language code, for the instruction prompt.
