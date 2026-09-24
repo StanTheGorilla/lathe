@@ -42,7 +42,9 @@ jobs:
           path: source
           sparse-checkout: .github/release-notes
       - name: Release notes
+        id: notes
         run: |
+          echo "name=Lathe ${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           notes="source/.github/release-notes/${GITHUB_REF_NAME}.md"
           if [ -f "$notes" ]; then cp "$notes" notes.md; else : > notes.md; fi
           cat notes.md
@@ -52,6 +54,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          name: ${{ steps.notes.outputs.name }}
           body_path: notes.md
           # The Linux artifact keeps its deb/ and appimage/ folders, hence the **.
           files: |
