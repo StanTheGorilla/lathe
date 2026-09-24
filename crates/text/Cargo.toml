@@ -1,0 +1,18 @@
+[package]
+name = "lathe-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The text passes that need no model, no GPU and no native toolchain: vocabulary
+# correction and replacement rules. Kept out of lathe-core so their tests build and run
+# in a minute on every push, where lathe-core needs the whole ggml stack first.
+
+[dependencies]
+regex = "1"
+rphonetic = "4"
+serde = { version = "1", features = ["derive"] }
+strsim = "0.11"
+
+[dev-dependencies]
+toml = "1"

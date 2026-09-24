@@ -18,7 +18,8 @@
 //   vocabulary term is its *exact phonetic twin* and within a small edit distance. That
 //   pairing is deliberately strict. "cohere" and "coherent" encode differently (KHR
 //   against KHRNT), so the pass leaves "coherent" alone -- which is exactly what the old
-//   explicit mapping got wrong.
+//   explicit mapping got wrong. Nor does it touch a word found in an English word list:
+//   twins within budget still include "rest" and "Rust".
 
 use rphonetic::{DoubleMetaphone, Encoder};
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,24 @@ pub struct Vocabulary {
     pub max_distance_ratio: f32,
     /// How hard to bias the recogniser toward these terms.
     pub hotword_boost: f32,
+    /// Let the cleanup model settle the words only the sentence can: "cloud" as the
+    /// word, or as "Claude". Off, they go the way they did before it existed.
+    pub context: bool,
+    /// How much likelier, as a log-probability, the term must make the sentence before
+    /// an English word that merely sounds like a term is rewritten. A named spoken form
+    /// needs only to be the likelier of the two.
+    ///
+    /// 0.5 from `lathe-spike context-eval` on its 38 sentences, run with S1-mini, Gemma
+    /// 4 E2B, Qwen3.5 4B and LFM2.5 1.2B: no sentence that meant the everyday word
+    /// scored above -3.7 on any of them, and 0.5 is where S1-mini and Qwen3.5 got the
+    /// most right. Lower risks swapping a word that was meant; higher misses swaps.
+    pub context_margin: f32,
+    /// In English, weigh these questions with the instruction model rather than
+    /// S1-mini, keeping both resident. Measured on the same 38 sentences, Gemma 4 E2B
+    /// settled all 12 "cloud or Claude" cases and S1-mini 8 -- the small model barely
+    /// knows the name -- at the cost of a second model in memory. Off by default for
+    /// that cost.
+    pub context_with_instruction_model: bool,
     pub sets: Vec<Set>,
 }
 
@@ -134,6 +153,9 @@ impl Default for Vocabulary {
             correction_enabled: true,
             max_distance_ratio: 0.34,
             hotword_boost: 2.0,
+            context: true,
+            context_margin: 0.5,
+            context_with_instruction_model: false,
             sets: default_sets(),
         }
     }
@@ -174,7 +196,29 @@ impl Vocabulary {
     }
 
     /// Pass 2. Returns the corrected text and how many words changed.
+    ///
+    /// With nothing to judge context, a word only the sentence could settle goes the
+    /// way it always did: a named spoken form is written as its term, and an English
+    /// word that merely sounds like one is left as heard.
     pub fn correct(&self, text: &str) -> (String, usize) {
+        self.correct_in_context(text, &mut |_| None)
+    }
+
+    /// Pass 2, with a judge for the words only the sentence can settle.
+    ///
+    /// "cloud" is a spoken form of "Claude" in "I asked cloud about it" and the word
+    /// the speaker meant in "deploy it to the cloud". No rule on the word alone gets
+    /// both, so each such word is put to `judge` as the whole sentence both ways, and
+    /// it answers whether the term reads better. `None` means it has no opinion, and
+    /// the word goes the way [`Vocabulary::correct`] would take it.
+    ///
+    /// Settled left to right: each question sees the answers before it, and the words
+    /// after it as heard.
+    pub fn correct_in_context(
+        &self,
+        text: &str,
+        judge: &mut dyn FnMut(&Choice) -> Option<bool>,
+    ) -> (String, usize) {
         if !self.correction_enabled || text.is_empty() {
             return (text.to_string(), 0);
         }
@@ -182,7 +226,9 @@ impl Vocabulary {
         if terms.is_empty() {
             return (text.to_string(), 0);
         }
-        Corrector::new(&terms, self.max_distance_ratio).apply(text)
+        let corrector = Corrector::new(&terms, self.max_distance_ratio);
+        let pieces = corrector.pieces(text);
+        resolve(&pieces, judge)
     }
 
     /// The view of this vocabulary a preset sees. An empty selection means every set
@@ -195,6 +241,9 @@ impl Vocabulary {
             correction_enabled: self.correction_enabled,
             max_distance_ratio: self.max_distance_ratio,
             hotword_boost: self.hotword_boost,
+            context: self.context,
+            context_margin: self.context_margin,
+            context_with_instruction_model: self.context_with_instruction_model,
             sets: self
                 .sets
                 .iter()
@@ -254,71 +303,86 @@ impl<'a> Corrector<'a> {
         }
     }
 
-    fn apply(&self, text: &str) -> (String, usize) {
-        let mut out = String::with_capacity(text.len());
-        let mut replacements = 0;
-
-        for token in tokenize(text) {
-            match token {
-                Token::Gap(gap) => out.push_str(gap),
+    /// The text as settled words and open questions.
+    fn pieces<'t>(&self, text: &'t str) -> Vec<Piece<'t>> {
+        tokenize(text)
+            .into_iter()
+            .map(|token| match token {
+                Token::Gap(gap) => Piece::Kept(gap),
                 Token::Word(word) => match self.lookup(word) {
-                    Some(term) => {
-                        out.push_str(&match_case(word, term));
-                        replacements += 1;
-                    }
-                    None => out.push_str(word),
+                    Lookup::Sure(term) => Piece::Fixed(match_case(word, term)),
+                    Lookup::Either { term, named } => Piece::Open {
+                        heard: word,
+                        term: match_case(word, term),
+                        named,
+                    },
+                    Lookup::Nothing => Piece::Kept(word),
                 },
-            }
-        }
-
-        (out, replacements)
+            })
+            .collect()
     }
 
     /// A named spoken form first, then the phonetic net.
-    fn lookup(&self, word: &str) -> Option<&'a str> {
-        if let Some(term) = self.spoken.get(&word.to_lowercase()) {
-            return Some(term);
+    ///
+    /// A spoken form that is itself an English word is a question, not an answer: the
+    /// user named the pairing, but they also say the word and mean it.
+    fn lookup(&self, word: &str) -> Lookup<'a> {
+        let lower = word.to_lowercase();
+        if let Some(term) = self.spoken.get(&lower) {
+            return if is_english_word(&lower) {
+                Lookup::Either { term, named: true }
+            } else {
+                Lookup::Sure(term)
+            };
         }
-        self.best_match(word)
+        self.best_match(&lower)
     }
 
     /// A candidate must be phonetically identical *and* within the edit-distance budget.
     /// Either test alone is far too eager: phonetic keys collide often, and edit distance
     /// happily turns "form" into "from".
-    fn best_match(&self, word: &str) -> Option<&'a str> {
-        let lower = word.to_lowercase();
+    fn best_match(&self, lower: &str) -> Lookup<'a> {
         // Short words are mostly function words, and one edit reaches half the dictionary
         // from there.
         if lower.chars().count() < 4 {
-            return None;
+            return Lookup::Nothing;
         }
+        // A real English word is something the speaker may have said, so the inferred
+        // pass never rewrites one outright. Phonetic key plus edit distance alone turned
+        // "rest" into "Rust", "vote" into "Vite" and "branches" into "branch" on the
+        // default sets. It may still ask: with the budget one wider, since the sentence
+        // is what decides, which is how "cloud" reaches "Claude".
+        let english = is_english_word(lower);
 
         // rphonetic's Double Metaphone slices by byte offset and panics outright on a
         // multi-byte character, so nothing non-ASCII may reach it. Folding rather than
         // skipping is what lets a Polish name in the vocabulary still match the
         // recogniser's unaccented guess at it.
-        let folded = fold_to_ascii(&lower)?;
+        let Some(folded) = fold_to_ascii(lower) else {
+            return Lookup::Nothing;
+        };
         let code = self.phonetic.encode(&folded);
         if code.is_empty() {
-            return None;
+            return Lookup::Nothing;
         }
 
         let budget = ((lower.chars().count() as f32) * self.max_distance_ratio).floor() as usize;
         if budget == 0 {
-            return None;
+            return Lookup::Nothing;
         }
+        let budget = if english { budget + 1 } else { budget };
 
         let mut best: Option<(usize, &'a str)> = None;
         for (term, term_code, written) in &self.candidates {
             // Already correct, ignoring case. Nothing to do, and nothing else may claim
             // this word either.
-            if *term == lower {
-                return None;
+            if term == lower {
+                return Lookup::Nothing;
             }
             if *term_code != code {
                 continue;
             }
-            let distance = strsim::levenshtein(&lower, term);
+            let distance = strsim::levenshtein(lower, term);
             if distance > budget {
                 continue;
             }
@@ -326,8 +390,120 @@ impl<'a> Corrector<'a> {
                 best = Some((distance, written));
             }
         }
-        best.map(|(_, written)| written)
+        match best {
+            None => Lookup::Nothing,
+            Some((_, term)) if english => Lookup::Either { term, named: false },
+            Some((_, term)) => Lookup::Sure(term),
+        }
     }
+}
+
+enum Lookup<'a> {
+    Nothing,
+    Sure(&'a str),
+    /// The sentence decides. `named` when the user wrote the pairing down.
+    Either { term: &'a str, named: bool },
+}
+
+enum Piece<'t> {
+    /// As heard: a gap, or a word nothing claims.
+    Kept(&'t str),
+    /// A correction nothing can argue with.
+    Fixed(String),
+    /// A word only the sentence can settle.
+    Open {
+        heard: &'t str,
+        term: String,
+        named: bool,
+    },
+}
+
+/// One word the vocabulary could claim, put as the whole sentence both ways.
+#[derive(Debug)]
+pub struct Choice {
+    pub as_heard: String,
+    pub as_term: String,
+    /// The word and the term it might be, for logging.
+    pub heard: String,
+    pub term: String,
+    /// The user named this pairing ("Also heard as"), rather than it being inferred
+    /// from how the words sound. A judge may lean toward the term for these.
+    pub named: bool,
+}
+
+impl Choice {
+    /// The answer two log-probabilities give, under this vocabulary's margin.
+    pub fn decide(&self, as_heard: f32, as_term: f32, margin: f32) -> bool {
+        let needed = if self.named { 0.0 } else { margin };
+        as_term - as_heard > needed
+    }
+}
+
+fn resolve(pieces: &[Piece], judge: &mut dyn FnMut(&Choice) -> Option<bool>) -> (String, usize) {
+    let mut changed = pieces
+        .iter()
+        .filter(|p| matches!(p, Piece::Fixed(_)))
+        .count();
+    // The answer for each open word, in order; unanswered ones read as heard.
+    let mut answers: Vec<bool> = Vec::new();
+    let render = |answers: &[bool], pending: Option<bool>| {
+        let mut out = String::new();
+        let mut open = 0;
+        for piece in pieces {
+            match piece {
+                Piece::Kept(t) => out.push_str(t),
+                Piece::Fixed(t) => out.push_str(t),
+                Piece::Open { heard, term, .. } => {
+                    let as_term = match answers.get(open) {
+                        Some(a) => *a,
+                        None if open == answers.len() => pending.unwrap_or(false),
+                        None => false,
+                    };
+                    out.push_str(if as_term { term } else { heard });
+                    open += 1;
+                }
+            }
+        }
+        out
+    };
+
+    for piece in pieces {
+        let Piece::Open { heard, term, named } = piece else {
+            continue;
+        };
+        let choice = Choice {
+            as_heard: render(&answers, Some(false)),
+            as_term: render(&answers, Some(true)),
+            heard: heard.to_string(),
+            term: term.clone(),
+            named: *named,
+        };
+        // No opinion: a named form is written as the term, which is what the user
+        // asked for, and an inferred one stays as heard.
+        let as_term = judge(&choice).unwrap_or(*named);
+        if as_term {
+            changed += 1;
+        }
+        answers.push(as_term);
+    }
+
+    (render(&answers, None), changed)
+}
+
+/// Whether `lower` is an ordinary English word. Only lowercase entries are listed, so a
+/// proper noun such as "Vulcan" is not one, and "vulcan" can still become "Vulkan".
+fn is_english_word(lower: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    WORDS
+        .get_or_init(|| {
+            include_str!("english-words.txt")
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        })
+        .contains(lower)
 }
 
 /// Strips Latin diacritics so a word can be handed to the phonetic encoder.
@@ -536,7 +712,9 @@ pub fn apply_replacements(text: &str, rules: &[Replacement]) -> String {
         if rule.find.is_empty() {
             continue;
         }
-        if rule.regex {
+        if !rule.regex && is_layout_command(rule) {
+            out = apply_layout_command(&out, rule);
+        } else if rule.regex {
             match regex::Regex::new(&rule.find) {
                 Ok(re) => out = re.replace_all(&out, rule.replace.as_str()).into_owned(),
                 // A bad pattern is the user's typo, not a reason to lose the dictation.
@@ -547,6 +725,34 @@ pub fn apply_replacements(text: &str, rules: &[Replacement]) -> String {
         }
     }
     out
+}
+
+/// A literal rule that turns spoken words into nothing but line breaks or spacing:
+/// "new paragraph", "new line". Those are dictated commands rather than text, and
+/// they reach the rules after cleanup has already treated them as words.
+fn is_layout_command(rule: &Replacement) -> bool {
+    !rule.replace.is_empty()
+        && rule.replace.chars().all(char::is_whitespace)
+        && rule.find.chars().any(char::is_alphabetic)
+}
+
+/// Cleanup capitalises and punctuates a spoken command like any other words, so
+/// "new paragraph" comes back as "New paragraph." or ", new paragraph,". Matched
+/// ignoring case, as whole words, and taking the punctuation and spaces the cleanup
+/// put around it: a comma before it and anything after it belonged to the command.
+/// A full stop before it is the end of the previous sentence and stays.
+fn apply_layout_command(text: &str, rule: &Replacement) -> String {
+    let words: Vec<String> = rule.find.split_whitespace().map(regex::escape).collect();
+    let pattern = format!(
+        r"(?i)[ \t]*[,;:]?[ \t]*\b{}\b[,.;:!?]*[ \t]*",
+        words.join(r"[ \t]+")
+    );
+    match regex::Regex::new(&pattern) {
+        Ok(re) => re
+            .replace_all(text, regex::NoExpand(&rule.replace))
+            .into_owned(),
+        Err(_) => text.replace(&rule.find, &rule.replace),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,11 +927,179 @@ mod tests {
         assert_eq!(back.terms, set.terms);
     }
 
+    /// Ordinary words that the phonetic net used to rewrite on the default sets: each is
+    /// a twin of a term within the edit budget.
     #[test]
-    fn replacements_are_literal_by_default() {
+    fn leaves_english_words_that_sound_like_a_term_alone() {
+        for text in [
+            "I'll do the rest tomorrow.",
+            "Please vote for the committee.",
+            "It will be cloudy.",
+            "Both branches failed.",
+            "The lender said no.",
+        ] {
+            assert_eq!(vocab().correct(text), (text.to_string(), 0));
+        }
+    }
+
+    /// No word in the list is ever rewritten by the shipped vocabulary. Guards the
+    /// shipped spoken forms too: one of those that is itself English would eat it.
+    #[test]
+    fn the_default_vocabulary_rewrites_no_english_word() {
+        let words: Vec<&str> = include_str!("english-words.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect();
+        let (out, n) = vocab().correct(&words.join(" "));
+        let changed: Vec<_> = out
+            .split(' ')
+            .zip(&words)
+            .filter(|(a, b)| a != *b)
+            .take(10)
+            .collect();
+        assert_eq!(n, 0, "rewrote {changed:?}");
+    }
+
+    #[test]
+    fn a_spoken_form_still_wins_over_an_english_word() {
+        let vocab = Vocabulary {
+            sets: vec![Set {
+                name: "ai".into(),
+                enabled: true,
+                terms: vec![Term::heard("Claude", &["cloudy"])],
+            }],
+            ..Vocabulary::default()
+        };
+        assert_eq!(vocab.correct("ask cloudy").0, "ask Claude");
+    }
+
+    fn claude_heard_as_cloud() -> Vocabulary {
+        Vocabulary {
+            sets: vec![Set {
+                name: "ai".into(),
+                enabled: true,
+                terms: vec![Term::heard("Claude", &["cloud"]), Term::new("Rust")],
+            }],
+            ..Vocabulary::default()
+        }
+    }
+
+    /// The case the named form alone could never get right: the same word, meant both
+    /// ways, settled by the sentence it is in.
+    #[test]
+    fn the_sentence_decides_a_named_form_that_is_also_a_word() {
+        let vocab = claude_heard_as_cloud();
+        // Stands in for the model: prefers the term after "asked", the word after "the".
+        let mut judge = |c: &Choice| Some(c.as_term.contains("asked Claude"));
+        assert_eq!(
+            vocab.correct_in_context("I asked cloud about it", &mut judge),
+            ("I asked Claude about it".to_string(), 1)
+        );
+        assert_eq!(
+            vocab.correct_in_context("deploy it to the cloud", &mut judge),
+            ("deploy it to the cloud".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn the_judge_sees_both_whole_sentences() {
+        let vocab = claude_heard_as_cloud();
+        let mut seen = Vec::new();
+        vocab.correct_in_context("Cloud, then rest.", &mut |c| {
+            seen.push((c.as_heard.clone(), c.as_term.clone(), c.named));
+            None
+        });
+        assert_eq!(
+            seen,
+            vec![
+                ("Cloud, then rest.".to_string(), "Claude, then rest.".to_string(), true),
+                // The first answer stands in the second question: no opinion on a
+                // named form means the term.
+                ("Claude, then rest.".to_string(), "Claude, then Rust.".to_string(), false),
+            ]
+        );
+    }
+
+    /// An English word that only sounds like a term is asked about, never assumed.
+    #[test]
+    fn an_inferred_twin_is_asked_and_kept_without_an_answer() {
+        let vocab = claude_heard_as_cloud();
+        let mut asked = 0;
+        let out = vocab.correct_in_context("I'll do the rest tomorrow.", &mut |c| {
+            asked += 1;
+            assert!(!c.named);
+            assert_eq!((c.heard.as_str(), c.term.as_str()), ("rest", "Rust"));
+            None
+        });
+        assert_eq!(asked, 1);
+        assert_eq!(out, ("I'll do the rest tomorrow.".to_string(), 0));
+        // And taken when the sentence says so.
+        let out = vocab.correct_in_context("written in rest", &mut |_| Some(true));
+        assert_eq!(out, ("written in Rust".to_string(), 1));
+    }
+
+    /// Two edits apart is out of reach for a sure correction, but close enough to ask.
+    #[test]
+    fn a_wider_twin_is_only_ever_a_question() {
+        let vocab = Vocabulary {
+            sets: vec![Set {
+                name: "ai".into(),
+                enabled: true,
+                terms: vec![Term::new("Claude")],
+            }],
+            ..Vocabulary::default()
+        };
+        assert_eq!(vocab.correct("I asked cloud").1, 0);
+        let out = vocab.correct_in_context("I asked cloud", &mut |_| Some(true));
+        assert_eq!(out.0, "I asked Claude");
+    }
+
+    /// A spoken form that is not a word needs no judge and never meets one.
+    #[test]
+    fn a_non_word_spoken_form_is_not_a_question() {
+        let out = vocab().correct_in_context("the Lata app", &mut |_| panic!("asked"));
+        assert_eq!(out, ("the Lathe app".to_string(), 1));
+    }
+
+    #[test]
+    fn layout_commands_work_on_raw_text() {
         let rules = default_replacements();
         let out = apply_replacements("first line new paragraph second line", &rules);
-        assert_eq!(out, "first line \n\n second line");
+        assert_eq!(out, "first line\n\nsecond line");
+    }
+
+    /// What cleanup hands the rules: the command capitalised and punctuated like any
+    /// other words.
+    #[test]
+    fn layout_commands_survive_cleanup_punctuation() {
+        let rules = default_replacements();
+        assert_eq!(
+            apply_replacements("First point. New paragraph. Second point.", &rules),
+            "First point.\n\nSecond point."
+        );
+        assert_eq!(
+            apply_replacements("Line one, new line, line two.", &rules),
+            "Line one\nline two."
+        );
+        assert_eq!(
+            apply_replacements("Done. New line", &rules),
+            "Done.\n"
+        );
+        // Whole words only.
+        assert_eq!(
+            apply_replacements("renew lines", &rules),
+            "renew lines"
+        );
+    }
+
+    #[test]
+    fn other_literal_rules_stay_exact() {
+        let rules = vec![Replacement {
+            find: "teh".into(),
+            replace: "the".into(),
+            regex: false,
+        }];
+        assert_eq!(apply_replacements("Teh cat and teh dog", &rules), "Teh cat and the dog");
     }
 
     #[test]

@@ -40,12 +40,16 @@ pub struct Engine {
     backend: Option<LlamaBackend>,
     asr: Option<Asr>,
     cleanup: Option<Cleanup>,
-    /// Loaded only when a non-English preset needs it. See amendment A21.
+    /// Loaded only when a non-English preset needs it. See amendment A21. Also serves
+    /// English when a general model was picked for English cleanup.
     cleanup_multilingual: Option<Cleanup>,
-    /// Set once the optional multilingual model has been looked for and was not there.
+    /// Which file `cleanup_multilingual` was loaded from. English and Polish may name
+    /// different instruction models, and switching must not keep the wrong one.
+    cleanup_multilingual_path: Option<std::path::PathBuf>,
+    /// The instruction model file last looked for and not found.
     /// Without it every non-English dictation would retry the load, and pay the warmup
     /// behind it, for a file that is still absent.
-    cleanup_multilingual_missing: bool,
+    cleanup_multilingual_missing: Option<std::path::PathBuf>,
     /// Resolved once per process. Enumerating adapters initialises the Vulkan backend,
     /// and the answer cannot change while the app is running.
     gpu: Option<crate::asr::Gpu>,
@@ -64,7 +68,8 @@ impl Engine {
             asr: None,
             cleanup: None,
             cleanup_multilingual: None,
-            cleanup_multilingual_missing: false,
+            cleanup_multilingual_path: None,
+            cleanup_multilingual_missing: None,
             gpu: None,
             spill_warning: None,
             last_used: Instant::now(),
@@ -100,6 +105,20 @@ impl Engine {
     pub fn wants_instruct(config: &Config, preset: &Preset) -> bool {
         !config.languages.current().eq_ignore_ascii_case("en")
             || (preset.cleanup && preset.rewrite != crate::cleanup::Rewrite::Off)
+            || config.english_uses_instruction_model()
+    }
+
+    /// Whether the resident instruction model is the file this dictation wants.
+    fn instruct_is(&self, config: &Config) -> bool {
+        self.cleanup_multilingual_path.as_deref() == Some(config.instruction_model_path().as_path())
+    }
+
+    /// Whether an English dictation also keeps the instruction model resident, to weigh
+    /// the vocabulary's questions with it rather than with S1-mini.
+    fn judges_with_instruct(config: &Config, preset: &Preset) -> bool {
+        !Self::wants_instruct(config, preset)
+            && config.vocabulary.context
+            && config.vocabulary.context_with_instruction_model
     }
 
     /// Whether everything *this dictation* needs is resident.
@@ -111,10 +130,12 @@ impl Engine {
         if self.asr.is_none() {
             return false;
         }
+        let instruct = (self.cleanup_multilingual.is_some() && self.instruct_is(config))
+            || self.cleanup_multilingual_missing.as_deref() == Some(config.instruction_model_path().as_path());
         if Self::wants_instruct(config, preset) {
-            self.cleanup_multilingual.is_some() || self.cleanup_multilingual_missing
+            instruct
         } else {
-            self.cleanup.is_some()
+            self.cleanup.is_some() && (instruct || !Self::judges_with_instruct(config, preset))
         }
     }
 
@@ -135,6 +156,7 @@ impl Engine {
     ) -> Result<()> {
         let language = config.languages.current();
         let english = !Self::wants_instruct(config, preset);
+        let judge = Self::judges_with_instruct(config, preset);
         if self.loaded(config, preset) {
             self.last_used = Instant::now();
             return Ok(());
@@ -143,15 +165,22 @@ impl Engine {
         // One cleanup model resident at a time. Both together are 3.2 GB beside the
         // speech model, and on an 8 GB card that other applications also use the second
         // one lands in system memory and runs 20-40x slower -- Polish cleanup was taking
-        // 35-90 s. Switching language costs a 1-2 s reload instead.
-        if english && self.cleanup_multilingual.take().is_some() {
+        // 35-90 s. Switching language costs a 1-2 s reload instead. The exception is a
+        // user who asked for the instruction model to judge vocabulary in English too.
+        if english && !judge && self.cleanup_multilingual.take().is_some() {
             eprintln!("instruction model unloaded: switching to S1-mini");
         }
         if !english && self.cleanup.take().is_some() {
             eprintln!("s1-mini unloaded: switching to the instruction model ({language})");
         }
+        // English and another language may each name their own instruction model.
+        if self.cleanup_multilingual.is_some() && !self.instruct_is(config) {
+            self.cleanup_multilingual = None;
+            self.cleanup_multilingual_path = None;
+            eprintln!("instruction model unloaded: this language uses a different one");
+        }
 
-        self.report_vram(config, english);
+        self.report_vram(config, english, judge);
 
         if self.asr.is_none() {
             progress("Loading speech model");
@@ -175,8 +204,8 @@ impl Engine {
             self.cleanup = Some(cleanup);
         }
 
-        if !english && self.cleanup_multilingual.is_none() {
-            let path = config.cleanup_multilingual_path();
+        if (!english || judge) && self.cleanup_multilingual.is_none() {
+            let path = config.instruction_model_path();
             if path.exists() {
                 progress("Loading multilingual cleanup model");
                 let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
@@ -190,7 +219,8 @@ impl Engine {
                 )?;
                 eprintln!("multilingual cleanup model loaded in {ms}ms");
                 self.cleanup_multilingual = Some(cleanup);
-                self.cleanup_multilingual_missing = false;
+                self.cleanup_multilingual_path = Some(path.clone());
+                self.cleanup_multilingual_missing = None;
             } else {
                 // Not fatal. Recognition still works in this language; only the tidying
                 // is missing, and the model is an optional download.
@@ -199,10 +229,17 @@ impl Engine {
                      non-English dictation will be pasted uncleaned",
                     path.display()
                 );
-                self.cleanup_multilingual_missing = true;
+                self.cleanup_multilingual_missing = Some(path.clone());
                 // A rewrite preset in English can still be cleaned the ordinary way,
                 // which beats pasting raw speech because one optional file is absent.
-                if language.eq_ignore_ascii_case("en") && self.cleanup.is_none() {
+                // (A judge that is missing just leaves S1-mini to judge.)
+                // Nor when S1-mini is not what English was given: the English file is
+                // the one that is missing.
+                if !judge
+                    && language.eq_ignore_ascii_case("en")
+                    && !config.english_uses_instruction_model()
+                    && self.cleanup.is_none()
+                {
                     eprintln!("the rewrite needs that model; cleaning with S1-mini instead");
                     progress("Loading cleanup model");
                     let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
@@ -221,7 +258,7 @@ impl Engine {
         }
 
         progress("Compiling shaders");
-        self.warmup(config, english)?;
+        self.warmup(config, english, judge)?;
         self.last_used = Instant::now();
         Ok(())
     }
@@ -230,7 +267,7 @@ impl Engine {
     /// when it will not fit. Weights that spill into system memory make every
     /// dictation 10-40x slower and nothing else says so. Measured before loading,
     /// because afterwards the budget cannot tell spilled weights from resident ones.
-    fn report_vram(&mut self, config: &Config, english: bool) {
+    fn report_vram(&mut self, config: &Config, english: bool, judge: bool) {
         let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
         if layers == 0 {
             return;
@@ -245,8 +282,8 @@ impl Engine {
         if english && self.cleanup.is_none() {
             pending.push(config.cleanup_path());
         }
-        if !english && self.cleanup_multilingual.is_none() {
-            pending.push(config.cleanup_multilingual_path());
+        if (!english || judge) && self.cleanup_multilingual.is_none() {
+            pending.push(config.instruction_model_path());
         }
         let needed: u64 = pending
             .iter()
@@ -271,7 +308,7 @@ impl Engine {
         }
     }
 
-    fn warmup(&mut self, config: &Config, english: bool) -> Result<()> {
+    fn warmup(&mut self, config: &Config, english: bool, judge: bool) -> Result<()> {
         let started = Instant::now();
         if let Some(asr) = &self.asr {
             let silence = vec![0.0f32; crate::audio::TARGET_RATE as usize];
@@ -295,6 +332,12 @@ impl Engine {
                 &[],
             );
         }
+        // A judge beside S1-mini only ever scores, so warming it means scoring once.
+        if let (true, Some(model), Some(backend)) =
+            (judge, &self.cleanup_multilingual, &self.backend)
+        {
+            let _ = model.log_likelihoods(backend, &["warm up", "warmed up"], config.models.threads);
+        }
         eprintln!("warmup took {}ms", started.elapsed().as_millis());
         Ok(())
     }
@@ -313,8 +356,9 @@ impl Engine {
         self.asr = None;
         self.cleanup = None;
         self.cleanup_multilingual = None;
+        self.cleanup_multilingual_path = None;
         // Looked for again next time: the download may have finished in the meantime.
-        self.cleanup_multilingual_missing = false;
+        self.cleanup_multilingual_missing = None;
         eprintln!("models unloaded after idle timeout");
         true
     }
@@ -341,7 +385,7 @@ impl Engine {
         // The VAD gate above still runs locally, so silence is never uploaded.
         let (text, asr_ms) = if config.remote_asr.enabled {
             let started = Instant::now();
-            match remote_transcribe(config, &gated.pcm, lang) {
+            match remote_transcribe(config, &gated.pcm, lang, &vocabulary.terms(64)) {
                 Ok(text) => (text, started.elapsed().as_millis()),
                 Err(e) if config.remote_asr.fallback_to_local => {
                     eprintln!("remote transcription failed, falling back to local: {e:#}");
@@ -359,7 +403,48 @@ impl Engine {
         // Brief 5.5 pass 2: fix what biasing did not, before the cleanup model sees it.
         // Order matters -- correcting a proper noun after cleanup would mean the
         // normaliser had already reasoned about a word that was wrong.
-        let (text, corrections) = vocabulary.correct(&text);
+        //
+        // The words only the sentence can settle -- "cloud" as the word or as "Claude"
+        // -- are put to whichever cleanup model this dictation loaded, as the sentence
+        // both ways. It works on text, so it does the same job behind every speech
+        // model, including those that ignore pass 1 entirely.
+        let judge_model = if Self::wants_instruct(config, preset)
+            || Self::judges_with_instruct(config, preset)
+        {
+            self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
+        } else {
+            self.cleanup.as_ref()
+        };
+        let (text, corrections) = match (judge_model, &self.backend) {
+            (Some(model), Some(backend)) if vocabulary.context => {
+                let margin = vocabulary.context_margin;
+                let threads = config.models.threads;
+                vocabulary.correct_in_context(&text, &mut |choice| {
+                    match model.log_likelihoods(
+                        backend,
+                        &[&choice.as_heard, &choice.as_term],
+                        threads,
+                    ) {
+                        Ok(scores) => {
+                            let take = choice.decide(scores[0], scores[1], margin);
+                            eprintln!(
+                                "vocabulary: '{}' or '{}'? {:+.2} -> {}",
+                                choice.heard,
+                                choice.term,
+                                scores[1] - scores[0],
+                                if take { &choice.term } else { &choice.heard }
+                            );
+                            Some(take)
+                        }
+                        Err(e) => {
+                            eprintln!("vocabulary: could not weigh '{}': {e:#}", choice.heard);
+                            None
+                        }
+                    }
+                })
+            }
+            _ => vocabulary.correct(&text),
+        };
         if corrections > 0 {
             eprintln!("vocabulary: {corrections} correction(s)");
         }
@@ -456,7 +541,7 @@ impl Engine {
 /// Brief 4.3. Builds the backend per call rather than holding it: it owns no model and
 /// no connection, so there is nothing to keep warm, and reading the config each time
 /// means an endpoint change takes effect on the next dictation like every other setting.
-fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str) -> Result<String> {
+fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str, hints: &[String]) -> Result<String> {
     use crate::asr_backend::{AsrBackend, OpenAiCompatBackend};
 
     let remote = &config.remote_asr;
@@ -470,7 +555,10 @@ fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str) -> Result<String>
         Some(remote.api_key.clone()),
         remote.timeout_secs,
     );
-    backend.transcribe(pcm, lang, &[])
+    // The vocabulary goes out as the request's `prompt`, which is the only way to bias
+    // a remote recogniser. Capped like the local list: a Whisper-style prompt keeps
+    // only its last 224 tokens.
+    backend.transcribe(pcm, lang, hints)
 }
 
 /// The English name of a language code, for the instruction prompt.
@@ -502,5 +590,45 @@ pub fn language_name(code: &str) -> &'static str {
         "ar" => "Arabic",
         "hi" => "Hindi",
         _ => "the same language as the transcript",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_instruction_model_judges_english_only_when_asked() {
+        let mut config = Config::default();
+        let preset = config.active().clone();
+        assert!(!Engine::judges_with_instruct(&config, &preset));
+        config.vocabulary.context_with_instruction_model = true;
+        assert!(Engine::judges_with_instruct(&config, &preset));
+        // Context off means there is nothing to judge.
+        config.vocabulary.context = false;
+        assert!(!Engine::judges_with_instruct(&config, &preset));
+        // Polish goes through the instruction model anyway; it is not a second model.
+        config.vocabulary.context = true;
+        config.languages.active = "pl".into();
+        assert!(!Engine::judges_with_instruct(&config, &preset));
+    }
+
+    #[test]
+    fn a_general_model_picked_for_english_routes_english_through_it() {
+        let mut config = Config::default();
+        let preset = config.active().clone();
+        assert!(!Engine::wants_instruct(&config, &preset));
+        assert_eq!(config.instruction_model_path(), config.cleanup_multilingual_path());
+
+        config.models.cleanup = "gemma-4-E2B_q4_0-it.gguf".into();
+        assert!(Engine::wants_instruct(&config, &preset));
+        assert_eq!(config.instruction_model_path(), config.cleanup_path());
+        // Already the instruction model, so there is no second one to judge with.
+        config.vocabulary.context_with_instruction_model = true;
+        assert!(!Engine::judges_with_instruct(&config, &preset));
+
+        // Polish keeps its own model whatever English uses.
+        config.languages.active = "pl".into();
+        assert_eq!(config.instruction_model_path(), config.cleanup_multilingual_path());
     }
 }

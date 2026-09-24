@@ -159,6 +159,26 @@ enum Command {
         /// Language code. Anything but "en" uses the instruction-model prompt.
         #[arg(long, default_value = "en")]
         lang: String,
+        /// Use the instruction-model prompt in English too, to compare a general model
+        /// (LFM2.5, Qwen3.5, Gemma) against S1-mini on the same set with
+        /// --against-clean. Pass the model with --cleanup-model.
+        #[arg(long)]
+        instruct: bool,
+    },
+    /// Put the vocabulary's context questions to a cleanup model and score its answers.
+    ///
+    /// Each line is a sentence as heard, the word in it that a term might claim, and
+    /// whether that word was meant as heard or as the term. The model reads the
+    /// sentence both ways, exactly as a dictation does, and the report gives the
+    /// accuracy at a range of margins, so `context_margin` can be set from evidence.
+    ContextEval {
+        /// JSON lines of {text, heard, term, named, want: "term" | "heard"}.
+        #[arg(long, default_value = "assets/context-eval.jsonl")]
+        set: PathBuf,
+        /// Judge with the instruction model given by --multilingual-model instead of
+        /// the English cleanup model.
+        #[arg(long)]
+        instruct: bool,
     },
     /// Duck other applications for a few seconds, then restore. Verifies the ducking
     /// path without needing a dictation.
@@ -430,6 +450,7 @@ fn main() -> Result<()> {
             reference,
             against_clean,
             lang,
+            instruct,
         } => {
             cleanup_eval(
                 &cli.models,
@@ -440,7 +461,17 @@ fn main() -> Result<()> {
                 reference.as_deref(),
                 against_clean,
                 &lang,
+                instruct,
             )?;
+        }
+
+        Command::ContextEval { set, instruct } => {
+            let (model, flavour) = if instruct {
+                (&cli.multilingual_model, cleanup::Flavour::Instruct)
+            } else {
+                (&cli.cleanup_model, cleanup::Flavour::S1Mini)
+            };
+            context_eval(&cli.models.join(model), flavour, cli.gpu, &set)?;
         }
 
         Command::Duck { secs, level } => {
@@ -632,6 +663,136 @@ fn run_cleanup(
     Ok(cleaned)
 }
 
+#[derive(serde::Deserialize)]
+struct ContextItem {
+    text: String,
+    heard: String,
+    term: String,
+    named: bool,
+    want: String,
+}
+
+/// One question and what the model made of it.
+struct ContextScore {
+    text: String,
+    heard: String,
+    term: String,
+    named: bool,
+    want_term: bool,
+    /// log p(as term) - log p(as heard).
+    delta: f32,
+}
+
+fn context_eval(
+    model_path: &Path,
+    flavour: cleanup::Flavour,
+    gpu: i32,
+    set: &Path,
+) -> Result<()> {
+    use lathe_core::vocabulary::{Set, Term, Vocabulary};
+
+    let items: Vec<ContextItem> = read_jsonl(set)?;
+    let backend = LlamaBackend::init()?;
+    let (model, load_ms) = cleanup::Cleanup::load(&backend, model_path, gpu, 999, flavour)?;
+    eprintln!("{} loaded in {load_ms}ms, {} sentences", model_path.display(), items.len());
+
+    let mut scores = Vec::new();
+    let mut unasked = Vec::new();
+    let started = std::time::Instant::now();
+    for item in &items {
+        let term = if item.named {
+            Term::heard(item.term.clone(), &[item.heard.as_str()])
+        } else {
+            Term::new(item.term.clone())
+        };
+        let vocabulary = Vocabulary {
+            sets: vec![Set {
+                name: "eval".into(),
+                enabled: true,
+                terms: vec![term],
+            }],
+            ..Vocabulary::default()
+        };
+        let mut asked = false;
+        let mut failure = None;
+        vocabulary.correct_in_context(&item.text, &mut |choice| {
+            if !choice.heard.eq_ignore_ascii_case(&item.heard) {
+                return None;
+            }
+            asked = true;
+            match model.log_likelihoods(&backend, &[&choice.as_heard, &choice.as_term], threads()) {
+                Ok(s) => scores.push(ContextScore {
+                    text: item.text.clone(),
+                    heard: item.heard.clone(),
+                    term: item.term.clone(),
+                    named: item.named,
+                    want_term: item.want == "term",
+                    delta: s[1] - s[0],
+                }),
+                Err(e) => failure = Some(e),
+            }
+            None
+        });
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if !asked {
+            unasked.push(item.text.clone());
+        }
+    }
+    let per_question = started.elapsed().as_millis() as f64 / scores.len().max(1) as f64;
+
+    println!("{:>7}  {:<5} {:<6} sentence", "delta", "want", "kind");
+    for s in &scores {
+        println!(
+            "{:>+7.2}  {:<5} {:<6} {}  [{} / {}]",
+            s.delta,
+            if s.want_term { "term" } else { "heard" },
+            if s.named { "named" } else { "twin" },
+            s.text,
+            s.heard,
+            s.term,
+        );
+    }
+    if !unasked.is_empty() {
+        println!("\nnever asked (the vocabulary did not treat the word as a question):");
+        for t in &unasked {
+            println!("  {t}");
+        }
+    }
+
+    // Named forms switch on any lead; inferred twins need the margin. Accuracy for
+    // each margin tells which value to put in `context_margin`.
+    println!("\n{:>7}  {:>11}  {:>11}  {:>11}", "margin", "named", "twins", "all");
+    let default_margin = Vocabulary::default().context_margin;
+    for margin in [-1.0f32, 0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0] {
+        let right = |named: Option<bool>| {
+            let pool: Vec<_> = scores
+                .iter()
+                .filter(|s| named.is_none_or(|n| s.named == n))
+                .collect();
+            let ok = pool
+                .iter()
+                .filter(|s| {
+                    let needed = if s.named { 0.0 } else { margin };
+                    (s.delta > needed) == s.want_term
+                })
+                .count();
+            format!("{ok}/{}", pool.len())
+        };
+        println!(
+            "{:>7.1}  {:>11}  {:>11}  {:>11}{}",
+            margin,
+            right(Some(true)),
+            right(Some(false)),
+            right(None),
+            if margin == default_margin { "  <- current default" } else { "" }
+        );
+    }
+    println!("\n{per_question:.0} ms per question, both readings together");
+    Ok(())
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EvalItem {
     raw: String,
@@ -679,9 +840,10 @@ fn cleanup_eval(
     reference: Option<&Path>,
     against_clean: bool,
     lang: &str,
+    instruct: bool,
 ) -> Result<()> {
     let items: Vec<EvalItem> = read_jsonl(set)?;
-    let flavour = if lang.eq_ignore_ascii_case("en") {
+    let flavour = if lang.eq_ignore_ascii_case("en") && !instruct {
         cleanup::Flavour::S1Mini
     } else {
         cleanup::Flavour::Instruct

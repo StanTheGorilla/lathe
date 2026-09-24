@@ -91,6 +91,16 @@
     },
   ];
 
+  // General models that can clean English too, through the same prompt Polish uses.
+  const ENGLISH_GENERAL = [
+    {
+      file: "gemma-4-E2B_q4_0-it.gguf",
+      label: "Gemma 4 E2B  QAT Q4_0",
+      note: "More accurate than S1-mini on English in testing (4.8% against 6.9% of words wrong) and knows names like Claude, but about four times slower. The same file as the other-languages model, so one download serves both.",
+      size: "3.12 GB",
+    },
+  ];
+
   const MULTILINGUAL = [
     {
       file: "gemma-4-E2B_q4_0-it.gguf",
@@ -109,6 +119,12 @@
       label: "Gemma 3 4B  Q8_0",
       note: "Higher precision, but 1.5 GB more and it pushes the non-English pair to 6.1 GB resident.",
       size: "3.85 GB",
+    },
+    {
+      file: "Qwen3.5-4B-Q4_K_M.gguf",
+      label: "Qwen3.5 4B  Q4_K_M",
+      note: "Lists 201 languages; not yet measured on Polish. In English it cleaned no better than S1-mini and about twice as slowly as Gemma 4 E2B, but settled every \u201ccloud or Claude\u201d in testing.",
+      size: "2.74 GB",
     },
   ];
 
@@ -358,8 +374,8 @@
 {@render slot(
   "Cleanup, English",
   "cleanup",
-  CLEANUP,
-  "Punctuates and tidies English. Purpose-built for exactly this, which is why it beats a general model at it.",
+  [...CLEANUP, ...ENGLISH_GENERAL],
+  "Punctuates and tidies English. S1-mini is built for exactly this and is the fastest; Gemma 4 E2B cleans more accurately and is slower.",
 )}
 
 {@render slot(

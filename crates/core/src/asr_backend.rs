@@ -3,12 +3,9 @@
 // Two implementations behind one trait: the local whisper.cpp path, and an HTTP client
 // for any server exposing an OpenAI-compatible `/v1/audio/transcriptions` endpoint.
 //
-// The second exists because the strongest model for this job, Cohere Transcribe, cannot
-// run locally on this hardware -- custom conformer architecture, no ggml support, and a
-// Rust port that builds only for Linux/CPU and macOS/Metal. There is no Windows or AMD
-// path, and shipping one is not a matter of effort. What is possible is to make Lathe
-// able to talk to it wherever it does run: a machine on the network, a rented GPU, or
-// Cohere's own hosted API.
+// The second was first written because Cohere Transcribe could not run locally. It
+// now does, through CrispASR; the endpoint stays for anything bigger than the card can
+// hold -- a machine on the network, a rented GPU, or a hosted API.
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use std::time::Duration;
@@ -116,16 +113,33 @@ fn multipart_body(boundary: &str, wav: &[u8], model: &str, lang: &str, prompt: &
     body
 }
 
-impl AsrBackend for OpenAiCompatBackend {
-    fn transcribe(&self, pcm: &[f32], lang: &str, hints: &[String]) -> Result<String> {
-        if pcm.is_empty() {
-            bail!("no audio to transcribe");
-        }
+enum Rejected {
+    Status(u16),
+    Other(anyhow::Error),
+}
 
-        let wav = wav_bytes(pcm, crate::audio::TARGET_RATE);
-        let boundary = format!("lathe{:x}", std::time::UNIX_EPOCH.elapsed()?.as_nanos());
-        let prompt = hints.join(", ");
-        let body = multipart_body(&boundary, &wav, &self.model, lang, &prompt);
+impl Rejected {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            // Brief section 10: fail loudly and say why. A dictation tool that silently
+            // produces nothing when a server is unreachable is worse than one that says
+            // the server is unreachable.
+            Rejected::Status(code) => anyhow!("the transcription endpoint returned HTTP {code}"),
+            Rejected::Other(e) => e,
+        }
+    }
+}
+
+impl OpenAiCompatBackend {
+    fn post(&self, wav: &[u8], lang: &str, prompt: &str) -> Result<String, Rejected> {
+        let boundary = format!(
+            "lathe{:x}",
+            std::time::UNIX_EPOCH
+                .elapsed()
+                .map_err(|e| Rejected::Other(e.into()))?
+                .as_nanos()
+        );
+        let body = multipart_body(&boundary, wav, &self.model, lang, prompt);
 
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -143,29 +157,52 @@ impl AsrBackend for OpenAiCompatBackend {
         }
 
         let mut response = request.send(&body[..]).map_err(|e| match e {
-            // Brief section 10: fail loudly and say why. A dictation tool that silently
-            // produces nothing when a server is unreachable is worse than one that says
-            // the server is unreachable.
-            ureq::Error::StatusCode(code) => {
-                anyhow!("the transcription endpoint returned HTTP {code}")
-            }
-            other => anyhow!("could not reach the transcription endpoint: {other}"),
+            ureq::Error::StatusCode(code) => Rejected::Status(code),
+            other => Rejected::Other(anyhow!(
+                "could not reach the transcription endpoint: {other}"
+            )),
         })?;
 
         let text = response
             .body_mut()
             .read_to_string()
-            .context("reading the transcription response")?;
+            .context("reading the transcription response")
+            .map_err(Rejected::Other)?;
 
         // The documented response is {"text": "..."}; some servers nest it under a
         // segments array as well, but the top-level field is universal.
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).context("the endpoint did not return JSON")?;
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .context("the endpoint did not return JSON")
+            .map_err(Rejected::Other)?;
         parsed
             .get("text")
             .and_then(|t| t.as_str())
             .map(|t| t.trim().to_string())
-            .ok_or_else(|| anyhow!("the response had no \"text\" field: {text}"))
+            .ok_or_else(|| Rejected::Other(anyhow!("the response had no \"text\" field: {text}")))
+    }
+}
+
+impl AsrBackend for OpenAiCompatBackend {
+    fn transcribe(&self, pcm: &[f32], lang: &str, hints: &[String]) -> Result<String> {
+        if pcm.is_empty() {
+            bail!("no audio to transcribe");
+        }
+
+        let wav = wav_bytes(pcm, crate::audio::TARGET_RATE);
+        let prompt = hints.join(", ");
+        match self.post(&wav, lang, &prompt) {
+            // `prompt` is in the OpenAI shape, but not every server that copies the
+            // shape accepts it. A server that refuses the request over the vocabulary
+            // is asked again without it: the words are a hint, the transcript is the job.
+            Err(Rejected::Status(code @ (400 | 422))) if !prompt.is_empty() => {
+                eprintln!(
+                    "the transcription endpoint refused the vocabulary prompt (HTTP {code}); \
+                     retrying without it"
+                );
+                self.post(&wav, lang, "").map_err(Rejected::into_error)
+            }
+            other => other.map_err(Rejected::into_error),
+        }
     }
 
     fn languages(&self) -> &[&str] {
@@ -173,5 +210,91 @@ impl AsrBackend for OpenAiCompatBackend {
         // discovery. An empty list means "no claim made" rather than "none supported";
         // the language string is passed through untouched.
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    /// A server that answers each request with the next status in `statuses`, and hands
+    /// back every request body it received.
+    fn server(statuses: &'static [u16]) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for status in statuses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 65536];
+                // Read the headers, then as much body as Content-Length says.
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                bodies.push(String::from_utf8_lossy(&raw).into_owned());
+                let body = if *status == 200 { r#"{"text":"hello"}"# } else { "{}" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            bodies
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sends_the_vocabulary_as_the_prompt() {
+        let (url, handle) = server(&[200]);
+        let backend = OpenAiCompatBackend::new(&url, "m", None, 10);
+        let hints = vec!["Claude".to_string(), "Vulkan".to_string()];
+        assert_eq!(backend.transcribe(&[0.0; 1600], "en", &hints).unwrap(), "hello");
+        let bodies = handle.join().unwrap();
+        assert!(bodies[0].contains("name=\"prompt\"\r\n\r\nClaude, Vulkan\r\n"));
+    }
+
+    #[test]
+    fn a_server_that_refuses_the_prompt_is_asked_again_without_it() {
+        let (url, handle) = server(&[400, 200]);
+        let backend = OpenAiCompatBackend::new(&url, "m", None, 10);
+        let hints = vec!["Claude".to_string()];
+        assert_eq!(backend.transcribe(&[0.0; 1600], "en", &hints).unwrap(), "hello");
+        let bodies = handle.join().unwrap();
+        assert!(bodies[0].contains("name=\"prompt\""));
+        assert!(!bodies[1].contains("name=\"prompt\""));
+    }
+
+    #[test]
+    fn other_failures_are_not_retried() {
+        let (url, handle) = server(&[500]);
+        let backend = OpenAiCompatBackend::new(&url, "m", None, 10);
+        let err = backend
+            .transcribe(&[0.0; 1600], "en", &["Claude".to_string()])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("HTTP 500"), "{err:#}");
+        assert_eq!(handle.join().unwrap().len(), 1);
     }
 }

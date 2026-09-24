@@ -472,6 +472,24 @@ impl Config {
     pub fn cleanup_multilingual_path(&self) -> PathBuf {
         self.models.dir.join(&self.models.cleanup_multilingual)
     }
+
+    /// Whether English is cleaned by a general instruction model rather than S1-mini,
+    /// because one was picked for the English slot. Read off the file name: every
+    /// S1-mini build this app knows of carries it, and S1-mini's prompt contract is
+    /// fixed, so anything else has to be told what cleaning means.
+    pub fn english_uses_instruction_model(&self) -> bool {
+        !self.models.cleanup.to_lowercase().contains("s1-mini")
+    }
+
+    /// The instruction model a dictation in the current language would use: the one
+    /// picked for English when English has one, the multilingual one otherwise.
+    pub fn instruction_model_path(&self) -> PathBuf {
+        if self.languages.current().eq_ignore_ascii_case("en") && self.english_uses_instruction_model() {
+            self.cleanup_path()
+        } else {
+            self.cleanup_multilingual_path()
+        }
+    }
 }
 
 /// Brief section 3: the config file is watched so the core reloads without a restart.

@@ -127,11 +127,14 @@ pub struct Cleanup {
     model: LlamaModel,
     flavour: Flavour,
     turns: Turns,
+    /// Whether prompts start with a BOS token. Gemma breaks without one; Qwen has none
+    /// to give, so the model's own metadata says, for everything but S1-mini.
+    add_bos: bool,
 }
 
 /// How an instruction model marks the turns of a conversation. Read off the model's
-/// architecture at load, because the two Gemma generations differ and a prompt in the
-/// wrong markup is silently treated as ordinary text.
+/// architecture at load, because the families differ and a prompt in the wrong markup
+/// is silently treated as ordinary text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Turns {
     /// Gemma 3: `<start_of_turn>user` ... `<end_of_turn>`.
@@ -139,12 +142,19 @@ pub enum Turns {
     /// Gemma 4: `<|turn>user` ... `<turn|>`. Thinking is off unless the system turn
     /// asks for it, and nothing here does.
     Gemma4,
+    /// `<|im_start|>user` ... `<|im_end|>`: Liquid's LFM2 and LFM2.5.
+    ChatMl,
+    /// ChatML with the thinking block closed before the reply, as S1-mini's own prompt
+    /// does: Qwen3 and Qwen3.5, which would otherwise spend the budget reasoning.
+    ChatMlNoThink,
 }
 
 impl Turns {
     fn for_architecture(arch: &str) -> Self {
         match arch {
             "gemma4" | "gemma4-assistant" => Turns::Gemma4,
+            "lfm2" | "lfm2moe" => Turns::ChatMl,
+            "qwen3" | "qwen3moe" | "qwen35" | "qwen35moe" | "qwen3next" => Turns::ChatMlNoThink,
             _ => Turns::Gemma3,
         }
     }
@@ -154,6 +164,10 @@ impl Turns {
         match self {
             Turns::Gemma3 => format!("<start_of_turn>user\n{body}<end_of_turn>\n<start_of_turn>model\n"),
             Turns::Gemma4 => format!("<|turn>user\n{body}<turn|>\n<|turn>model\n"),
+            Turns::ChatMl => format!("<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n"),
+            Turns::ChatMlNoThink => format!(
+                "<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            ),
         }
     }
 }
@@ -384,8 +398,26 @@ impl Cleanup {
         let turns = Turns::for_architecture(
             &model.meta_val_str("general.architecture").unwrap_or_default(),
         );
+        // S1-mini's prompt is complete as written and must not get one. Gemma-style
+        // models expect one and behave poorly without it -- the first attempt echoed the
+        // input back unchanged -- which is also the answer when the file does not say.
+        let add_bos = match flavour {
+            Flavour::S1Mini => false,
+            Flavour::Instruct => model
+                .meta_val_str("tokenizer.ggml.add_bos_token")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+        };
 
-        Ok((Self { model, flavour, turns }, load_ms))
+        Ok((
+            Self {
+                model,
+                flavour,
+                turns,
+                add_bos,
+            },
+            load_ms,
+        ))
     }
 
     pub fn normalize(
@@ -440,6 +472,90 @@ impl Cleanup {
         self.generate(backend, &prompt, raw, 2.0, threads)
     }
 
+    fn bos(&self) -> AddBos {
+        if self.add_bos {
+            AddBos::Always
+        } else {
+            AddBos::Never
+        }
+    }
+
+    /// How likely the model finds each text, as a total log-probability, for the
+    /// vocabulary's questions: "I asked cloud about it" or "I asked Claude about it".
+    ///
+    /// Each text is scored inside the prompt this model is used with, so S1-mini reads
+    /// it where it was trained to read transcripts. The prompt around the texts is the
+    /// same for all of them, so only the difference between two scores means anything.
+    /// One context serves every text; the cache is cleared between them.
+    pub fn log_likelihoods(
+        &self,
+        backend: &LlamaBackend,
+        texts: &[&str],
+        threads: i32,
+    ) -> Result<Vec<f32>> {
+        let prompts = texts
+            .iter()
+            .map(|text| {
+                let prompt = match self.flavour {
+                    Flavour::S1Mini => build_prompt(
+                        text,
+                        Styling::SemiFormal,
+                        Structure::Prose,
+                        Context::General,
+                    ),
+                    Flavour::Instruct => self.turns.wrap(&format!("Transcript:\n{text}")),
+                };
+                self.model.str_to_token(&prompt, self.bos())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // The texts differ in one word. Only the tokens from there on can score
+        // differently, and only for a while after it: a whole dictation's worth of
+        // logits is n_vocab floats per token, hundreds of MB for a long one. So the
+        // scored window runs from the first token that differs to a little past the
+        // last, and nothing after that window is decoded at all.
+        const AFTER: usize = 24;
+        let prefix = common_prefix(&prompts);
+        let suffix = common_suffix(&prompts);
+        let windows: Vec<usize> = prompts
+            .iter()
+            .map(|t| t.len().min(t.len().saturating_sub(suffix) + AFTER))
+            .collect();
+        let longest = windows.iter().copied().max().unwrap_or(0);
+        if longest < 2 {
+            return Ok(vec![0.0; texts.len()]);
+        }
+        let first = prefix.max(1) - 1;
+
+        let n_ctx = longest as u32 + 8;
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(n_ctx))
+            .with_n_batch(n_ctx.max(512))
+            .with_n_ubatch(n_ctx.max(512))
+            .with_n_threads(threads)
+            .with_n_threads_batch(threads);
+        let mut ctx = self.model.new_context(backend, ctx_params)?;
+        let mut batch = LlamaBatch::new(n_ctx as usize, 1);
+
+        let mut scores = Vec::with_capacity(prompts.len());
+        for (tokens, &end) in prompts.iter().zip(&windows) {
+            let tokens = &tokens[..end];
+            ctx.clear_kv_cache();
+            batch.clear();
+            for (i, token) in tokens.iter().enumerate() {
+                // Position i predicts token i + 1.
+                batch.add(*token, i as i32, &[0], i >= first && i + 1 < tokens.len())?;
+            }
+            ctx.decode(&mut batch)?;
+            let mut total = 0.0f64;
+            for i in first..tokens.len() - 1 {
+                total += log_prob(ctx.get_logits_ith(i as i32), tokens[i + 1].0 as usize);
+            }
+            scores.push(total as f32);
+        }
+        Ok(scores)
+    }
+
     fn generate(
         &self,
         backend: &LlamaBackend,
@@ -448,14 +564,7 @@ impl Cleanup {
         growth: f32,
         threads: i32,
     ) -> Result<Cleaned> {
-        // Gemma-style models expect a BOS token and behave poorly without one -- the
-        // first attempt echoed the input back unchanged. S1-mini's prompt is complete
-        // as written and must not get one.
-        let add_bos = match self.flavour {
-            Flavour::S1Mini => AddBos::Never,
-            Flavour::Instruct => AddBos::Always,
-        };
-        let tokens = self.model.str_to_token(prompt, add_bos)?;
+        let tokens = self.model.str_to_token(prompt, self.bos())?;
         let prompt_tokens = tokens.len();
 
         // Brief 4.2 item 4: 1.3 * input_tokens + 32, not a flat 1024. The input here is
@@ -530,6 +639,34 @@ impl Cleanup {
 }
 
 
+/// How many leading tokens every sequence shares.
+fn common_prefix<T: PartialEq>(seqs: &[Vec<T>]) -> usize {
+    let Some(first) = seqs.first() else { return 0 };
+    (0..first.len())
+        .take_while(|&i| seqs.iter().all(|s| s.get(i) == Some(&first[i])))
+        .count()
+}
+
+/// How many trailing tokens every sequence shares, never overlapping the prefix.
+fn common_suffix<T: PartialEq>(seqs: &[Vec<T>]) -> usize {
+    let prefix = common_prefix(seqs);
+    let shortest = seqs.iter().map(Vec::len).min().unwrap_or(0);
+    let Some(first) = seqs.first() else { return 0 };
+    (1..=shortest - prefix.min(shortest))
+        .take_while(|&k| {
+            let want = &first[first.len() - k];
+            seqs.iter().all(|s| &s[s.len() - k] == want)
+        })
+        .count()
+}
+
+/// The log-probability of `token` under the distribution `logits` describe.
+fn log_prob(logits: &[f32], token: usize) -> f64 {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let sum: f64 = logits.iter().map(|&l| (l as f64 - max).exp()).sum();
+    logits[token] as f64 - max - sum.ln()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +682,40 @@ mod tests {
         assert!(!g4.contains("<start_of_turn>"));
         assert_eq!(Turns::for_architecture("gemma4"), Turns::Gemma4);
         assert_eq!(Turns::for_architecture("gemma3"), Turns::Gemma3);
+    }
+
+    #[test]
+    fn chatml_models_get_chatml_and_qwen_gets_its_thinking_closed() {
+        assert_eq!(Turns::for_architecture("lfm2"), Turns::ChatMl);
+        assert_eq!(Turns::for_architecture("qwen35"), Turns::ChatMlNoThink);
+        let lfm = build_instruct_prompt_for(Turns::ChatMl, "x", "English", Styling::Formal, Structure::Prose, Context::General, &[]);
+        assert!(lfm.starts_with("<|im_start|>user\n"));
+        assert!(lfm.ends_with("<|im_end|>\n<|im_start|>assistant\n"));
+        let qwen = build_instruct_prompt_for(Turns::ChatMlNoThink, "x", "English", Styling::Formal, Structure::Prose, Context::General, &[]);
+        assert!(qwen.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn the_scored_window_is_where_the_texts_differ() {
+        let a = vec![1, 2, 3, 4, 5, 6];
+        let b = vec![1, 2, 9, 9, 5, 6];
+        assert_eq!(common_prefix(&[a.clone(), b.clone()]), 2);
+        assert_eq!(common_suffix(&[a.clone(), b.clone()]), 2);
+        // Different lengths, and identical sequences, never overlap the two counts.
+        assert_eq!(common_suffix(&[vec![1, 2, 3], vec![1, 2, 7, 3]]), 1);
+        assert_eq!(common_prefix(&[a.clone(), a.clone()]), 6);
+        assert_eq!(common_suffix(&[a.clone(), a]), 0);
+    }
+
+    #[test]
+    fn log_prob_is_a_normalised_log_softmax() {
+        let logits = [1.0f32, 2.0, 3.0];
+        let total: f64 = (0..3).map(|i| log_prob(&logits, i).exp()).sum();
+        assert!((total - 1.0).abs() < 1e-9);
+        assert!(log_prob(&logits, 2) > log_prob(&logits, 0));
+        // Shifting every logit changes nothing.
+        let shifted = [101.0f32, 102.0, 103.0];
+        assert!((log_prob(&logits, 1) - log_prob(&shifted, 1)).abs() < 1e-6);
     }
 
     #[test]

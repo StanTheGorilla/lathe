@@ -268,10 +268,11 @@
 
   <p class="hint">
     A word on its own is only ever swapped in for something that sounds the same, so
-    &ldquo;Cohere&rdquo; never touches &ldquo;coherent&rdquo;. &ldquo;Also heard as&rdquo;
-    is the deliberate exception: if Claude is heard as <span class="mono">cloud</span>,
-    every &ldquo;cloud&rdquo; becomes Claude while this set is on, so list only words you
-    never mean literally. Phrases are fine as words; only single words are corrected.
+    &ldquo;Cohere&rdquo; never touches &ldquo;coherent&rdquo;, and never outright for an
+    everyday English word. When Claude is heard as <span class="mono">cloud</span>, a
+    real word, the cleanup model reads the sentence both ways: &ldquo;ask cloud&rdquo;
+    becomes Claude, &ldquo;the cloud server&rdquo; stays. Phrases are fine as words; only
+    single words are corrected.
   </p>
 {/if}
 
@@ -303,6 +304,56 @@
     </span>
   </span>
 </label>
+
+<label class="check">
+  <input
+    type="checkbox"
+    checked={config.vocabulary.context}
+    onchange={(e) => { config.vocabulary.context = e.currentTarget.checked; onchange(); }}
+  />
+  <span>
+    Let the sentence decide words that are also everyday English
+    <span class="hint" style="margin:0">
+      When off, a word listed under &ldquo;Also heard as&rdquo; is always replaced, and a
+      word that only sounds like a term is always kept.
+    </span>
+  </span>
+</label>
+
+<label class="check">
+  <input
+    type="checkbox"
+    disabled={!config.vocabulary.context}
+    checked={config.vocabulary.context_with_instruction_model}
+    onchange={(e) => { config.vocabulary.context_with_instruction_model = e.currentTarget.checked; onchange(); }}
+  />
+  <span>
+    In English, decide with the instruction model
+    <span class="hint" style="margin:0">
+      Better with names: on the same test sentences Gemma 4 E2B settled every
+      &ldquo;cloud or Claude&rdquo; and S1-mini two in three. Keeps a second model in
+      memory, about 1 GB more graphics memory with Gemma 4 E2B.
+    </span>
+  </span>
+</label>
+
+<div class="field">
+  <label for="margin">Context margin</label>
+  <input
+    id="margin"
+    type="number"
+    step="0.5"
+    min="0"
+    max="10"
+    disabled={!config.vocabulary.context}
+    value={config.vocabulary.context_margin}
+    oninput={(e) => { config.vocabulary.context_margin = +e.currentTarget.value; onchange(); }}
+  />
+  <p class="hint">
+    How much better an everyday word must read as a term before it is swapped, for words
+    you did not list yourself. Higher swaps less. Listed words need only read better.
+  </p>
+</div>
 
 <div class="field">
   <label for="ratio">Similarity threshold</label>
