@@ -320,6 +320,23 @@
   </span>
 </label>
 
+<label class="check">
+  <input
+    type="checkbox"
+    disabled={!config.vocabulary.context}
+    checked={config.vocabulary.context_with_instruction_model}
+    onchange={(e) => { config.vocabulary.context_with_instruction_model = e.currentTarget.checked; onchange(); }}
+  />
+  <span>
+    In English, decide with the instruction model
+    <span class="hint" style="margin:0">
+      Better with names: on the same test sentences Gemma 4 E2B settled every
+      &ldquo;cloud or Claude&rdquo; and S1-mini two in three. Keeps a second model in
+      memory, about 1 GB more graphics memory with Gemma 4 E2B.
+    </span>
+  </span>
+</label>
+
 <div class="field">
   <label for="margin">Context margin</label>
   <input

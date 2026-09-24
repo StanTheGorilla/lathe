@@ -131,9 +131,19 @@ pub struct Vocabulary {
     pub context: bool,
     /// How much likelier, as a log-probability, the term must make the sentence before
     /// an English word that merely sounds like a term is rewritten. A named spoken form
-    /// needs only to be the likelier of the two. A starting point, not a measurement:
-    /// `lathe-spike context-eval` reports the margins on real sentences.
+    /// needs only to be the likelier of the two.
+    ///
+    /// 0.5 from `lathe-spike context-eval` on its 38 sentences, run with S1-mini, Gemma
+    /// 4 E2B, Qwen3.5 4B and LFM2.5 1.2B: no sentence that meant the everyday word
+    /// scored above -3.7 on any of them, and 0.5 is where S1-mini and Qwen3.5 got the
+    /// most right. Lower risks swapping a word that was meant; higher misses swaps.
     pub context_margin: f32,
+    /// In English, weigh these questions with the instruction model rather than
+    /// S1-mini, keeping both resident. Measured on the same 38 sentences, Gemma 4 E2B
+    /// settled all 12 "cloud or Claude" cases and S1-mini 8 -- the small model barely
+    /// knows the name -- at the cost of a second model in memory. Off by default for
+    /// that cost.
+    pub context_with_instruction_model: bool,
     pub sets: Vec<Set>,
 }
 
@@ -144,7 +154,8 @@ impl Default for Vocabulary {
             max_distance_ratio: 0.34,
             hotword_boost: 2.0,
             context: true,
-            context_margin: 1.0,
+            context_margin: 0.5,
+            context_with_instruction_model: false,
             sets: default_sets(),
         }
     }
@@ -232,6 +243,7 @@ impl Vocabulary {
             hotword_boost: self.hotword_boost,
             context: self.context,
             context_margin: self.context_margin,
+            context_with_instruction_model: self.context_with_instruction_model,
             sets: self
                 .sets
                 .iter()
