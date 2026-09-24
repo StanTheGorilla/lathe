@@ -1,0 +1,27 @@
+name: Publish release
+
+# Publishes a draft that release.yml made, once its installers have been checked.
+# Publishing creates the tag at the commit the draft was built from.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the draft release to publish, e.g. v0.1.15"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets \
+            --jq '"draft: \(.isDraft), assets: \(.assets | map(.name) | join(", "))"'
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
