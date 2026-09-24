@@ -2,13 +2,19 @@ name: Release
 
 # A pushed v* tag builds every platform through build.yml and attaches the installers
 # to a draft release, with the notes from .github/release-notes/<tag>.md. Publishing
-# the draft is done by hand.
+# the draft is done by hand. Run by hand with a tag, it does the same for the commit it
+# ran on, and GitHub creates the tag when the draft is published.
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create on publish, e.g. v0.1.15. Empty builds only."
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -43,17 +49,21 @@ jobs:
           sparse-checkout: .github/release-notes
       - name: Release notes
         id: notes
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          echo "name=Lathe ${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          notes="source/.github/release-notes/${GITHUB_REF_NAME}.md"
+          echo "name=Lathe ${TAG#v}" >> "$GITHUB_OUTPUT"
+          notes="source/.github/release-notes/${TAG}.md"
           if [ -f "$notes" ]; then cp "$notes" notes.md; else : > notes.md; fi
           cat notes.md
 
       - name: Create draft release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.notes.outputs.name }}
           body_path: notes.md
           # The Linux artifact keeps its deb/ and appimage/ folders, hence the **.
