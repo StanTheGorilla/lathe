@@ -18,9 +18,9 @@
   // The item whose cleaned text is open for editing, and the draft.
   let editing = $state(null);
   let draft = $state("");
-  // A correction that changed exactly one word: offered to the vocabulary, since a
+  // Words a correction swapped one for one: each offered to the vocabulary, since a
   // word fixed by hand is a mishearing the correction pass could catch next time.
-  let offer = $state(null);
+  let offers = $state([]);
   let offerSet = $state("");
 
   async function refresh() {
@@ -52,8 +52,8 @@
   async function saveEdit(item) {
     error = "";
     try {
-      const change = await historyCorrect(item.id, draft);
-      offer = change ? { heard: change[0], write: change[1] } : null;
+      const changes = await historyCorrect(item.id, draft);
+      offers = changes.map(([heard, write]) => ({ heard, write }));
       offerSet = config.vocabulary.sets[0]?.name ?? "";
       editing = null;
       await refresh();
@@ -65,7 +65,7 @@
   // Adds the mishearing as a spoken form of the wanted word in the chosen set,
   // creating the word if the set does not have it. Written by the save bar like any
   // other vocabulary edit.
-  function learn() {
+  function learn(offer) {
     const set = config.vocabulary.sets.find((s) => s.name === offerSet);
     if (!set) return;
     const term = set.terms.find((t) => t.write.toLowerCase() === offer.write.toLowerCase());
@@ -76,9 +76,11 @@
     } else {
       set.terms = [...set.terms, { write: offer.write, heard: [offer.heard] }];
     }
-    offer = null;
+    dismiss(offer);
     onchange();
   }
+
+  const dismiss = (offer) => (offers = offers.filter((o) => o !== offer));
 
   async function wipe() {
     try {
@@ -195,7 +197,7 @@
         <div class="row" style="margin-top:6px">
           <button class="primary" onclick={() => saveEdit(item)}>Save correction</button>
           <span class="hint" style="margin:0">
-            Fix one misheard word and Lathe offers to remember it.
+            Fix the misheard words and Lathe offers to remember each one.
           </span>
         </div>
       {:else}
@@ -208,23 +210,27 @@
   {/each}
 {/if}
 
-{#if offer}
+{#if offers.length}
   <div class="status info">
-    <div class="row">
-      <span>
-        Add <span class="mono">{offer.heard}</span> as a way of hearing
-        <span class="mono">{offer.write}</span> to
-      </span>
-      <select aria-label="Vocabulary set" bind:value={offerSet}>
-        {#each config.vocabulary.sets as s}
-          <option value={s.name}>{s.name}</option>
-        {/each}
-      </select>
-      <button class="primary" onclick={learn} disabled={!offerSet}>Add</button>
-      <button onclick={() => (offer = null)}>No</button>
-    </div>
+    {#each offers as offer (offer)}
+      <div class="row">
+        <span>
+          Add <span class="mono">{offer.heard}</span> as a way of hearing
+          <span class="mono">{offer.write}</span> to
+        </span>
+        <select aria-label="Vocabulary set" bind:value={offerSet}>
+          {#each config.vocabulary.sets as s}
+            <option value={s.name}>{s.name}</option>
+          {/each}
+        </select>
+        <button class="primary" onclick={() => learn(offer)} disabled={!offerSet}>Add</button>
+        <button onclick={() => dismiss(offer)}>No</button>
+      </div>
+    {/each}
     <p class="hint" style="margin:6px 0 0">
-      It lands in the vocabulary as a spoken form; Save changes below writes it.
+      Each lands in the vocabulary as a spoken form; Save changes below writes it. An
+      everyday word, like <span class="mono">cloud</span>, is not swapped blindly: the
+      cleanup model reads each sentence both ways and keeps the one that makes sense.
     </p>
   </div>
 {/if}

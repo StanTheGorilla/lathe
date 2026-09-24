@@ -110,6 +110,18 @@
       note: "Higher precision, but 1.5 GB more and it pushes the non-English pair to 6.1 GB resident.",
       size: "3.85 GB",
     },
+    {
+      file: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
+      label: "LFM2.5 1.2B Instruct  Q8_0",
+      note: "Not measured here yet. Small and fast, for rewrite presets in English; Polish is not among its listed languages.",
+      size: "1.25 GB",
+    },
+    {
+      file: "Qwen3.5-4B-Q4_K_M.gguf",
+      label: "Qwen3.5 4B  Q4_K_M",
+      note: "Not measured here yet. Lists 201 languages; larger than Gemma 4 E2B's graphics-memory share.",
+      size: "2.74 GB",
+    },
   ];
 
   const present = (file) => available.some((m) => m.file === file && m.present);

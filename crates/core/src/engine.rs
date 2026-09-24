@@ -359,7 +359,46 @@ impl Engine {
         // Brief 5.5 pass 2: fix what biasing did not, before the cleanup model sees it.
         // Order matters -- correcting a proper noun after cleanup would mean the
         // normaliser had already reasoned about a word that was wrong.
-        let (text, corrections) = vocabulary.correct(&text);
+        //
+        // The words only the sentence can settle -- "cloud" as the word or as "Claude"
+        // -- are put to whichever cleanup model this dictation loaded, as the sentence
+        // both ways. It works on text, so it does the same job behind every speech
+        // model, including those that ignore pass 1 entirely.
+        let judge_model = if Self::wants_instruct(config, preset) {
+            self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
+        } else {
+            self.cleanup.as_ref()
+        };
+        let (text, corrections) = match (judge_model, &self.backend) {
+            (Some(model), Some(backend)) if vocabulary.context => {
+                let margin = vocabulary.context_margin;
+                let threads = config.models.threads;
+                vocabulary.correct_in_context(&text, &mut |choice| {
+                    match model.log_likelihoods(
+                        backend,
+                        &[&choice.as_heard, &choice.as_term],
+                        threads,
+                    ) {
+                        Ok(scores) => {
+                            let take = choice.decide(scores[0], scores[1], margin);
+                            eprintln!(
+                                "vocabulary: '{}' or '{}'? {:+.2} -> {}",
+                                choice.heard,
+                                choice.term,
+                                scores[1] - scores[0],
+                                if take { &choice.term } else { &choice.heard }
+                            );
+                            Some(take)
+                        }
+                        Err(e) => {
+                            eprintln!("vocabulary: could not weigh '{}': {e:#}", choice.heard);
+                            None
+                        }
+                    }
+                })
+            }
+            _ => vocabulary.correct(&text),
+        };
         if corrections > 0 {
             eprintln!("vocabulary: {corrections} correction(s)");
         }

@@ -134,6 +134,26 @@ pub const KNOWN: &[Known] = &[
         approx_bytes: 2_530_000_000,
         required: false,
     },
+    // Instruction-model candidates from 2026, offered beside Gemma and not yet
+    // measured here: `lathe-spike cleanup-eval --instruct` and `context-eval
+    // --instruct` are how they earn a place. LFM2.5 is fast and small but names no
+    // Polish among its languages; Qwen3.5 lists 201.
+    Known {
+        file: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
+        label: "LFM2.5 1.2B Instruct Q8_0",
+        role: "Instruction model, alternative",
+        url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q8_0.gguf",
+        approx_bytes: 1_250_000_000,
+        required: false,
+    },
+    Known {
+        file: "Qwen3.5-4B-Q4_K_M.gguf",
+        label: "Qwen3.5 4B Q4_K_M",
+        role: "Instruction model, alternative",
+        url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+        approx_bytes: 2_740_000_000,
+        required: false,
+    },
     // whisper.cpp's own ggml container, not GGUF: CrispASR's whisper backend is
     // whisper.cpp's loader and reads nothing else. Amendment A35.
     Known {

@@ -230,31 +230,68 @@ impl History {
     }
 }
 
-/// The one word a correction changed, as (heard, wanted), when that is all it did.
+/// The words a correction swapped one for one, as (heard, wanted).
 ///
 /// Open work item 4, option 2: a hand-fixed word is a mishearing the vocabulary could
-/// carry as a spoken form, so the app offers it. Only a single substituted word
-/// qualifies -- the correction pass works one word at a time, and a change of case or
+/// carry as a spoken form, so the app offers it. The two texts are aligned word by
+/// word, so a correction that also fixed punctuation, dropped a filler or swapped
+/// several words still yields each swap. Only a single word replaced by a single word
+/// counts -- the correction pass works one word at a time -- and a change of case or
 /// punctuation alone is a styling matter, not a recognition error.
-pub fn single_word_change(before: &str, after: &str) -> Option<(String, String)> {
+pub fn word_changes(before: &str, after: &str) -> Vec<(String, String)> {
     let strip = |w: &str| {
         w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
             .to_string()
     };
-    let a: Vec<String> = before.split_whitespace().map(strip).collect();
-    let b: Vec<String> = after.split_whitespace().map(strip).collect();
-    if a.len() != b.len() {
-        return None;
+    let a: Vec<String> = before.split_whitespace().map(strip).filter(|w| !w.is_empty()).collect();
+    let b: Vec<String> = after.split_whitespace().map(strip).filter(|w| !w.is_empty()).collect();
+    let key = |w: &String| w.to_lowercase();
+
+    // Longest common subsequence, ignoring case, then walk it: every stretch between
+    // two matched words is what the correction replaced.
+    let (n, m) = (a.len(), b.len());
+    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if key(&a[i]) == key(&b[j]) {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
     }
-    let mut changed = a.iter().zip(&b).filter(|(x, y)| x != y);
-    let (heard, wanted) = changed.next()?;
-    if changed.next().is_some() || heard.is_empty() || wanted.is_empty() {
-        return None;
+
+    let mut changes = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let (mut gap_a, mut gap_b) = (Vec::new(), Vec::new());
+    // Cleanup keeps some fillers and the user deletes them in the same edit; one
+    // sitting beside a swapped word must not hide the swap.
+    let filler = |w: &&String| {
+        matches!(w.to_lowercase().as_str(), "um" | "uh" | "er" | "erm" | "ah" | "hmm" | "mm")
+    };
+    let mut flush = |gap_a: &mut Vec<&String>, gap_b: &mut Vec<&String>| {
+        gap_a.retain(|w| !filler(w));
+        if let ([heard], [wanted]) = (gap_a.as_slice(), gap_b.as_slice()) {
+            changes.push(((*heard).clone(), (*wanted).clone()));
+        }
+        gap_a.clear();
+        gap_b.clear();
+    };
+    while i < n || j < m {
+        if i < n && j < m && key(&a[i]) == key(&b[j]) {
+            flush(&mut gap_a, &mut gap_b);
+            i += 1;
+            j += 1;
+        } else if j < m && (i == n || lcs[i][j + 1] >= lcs[i + 1][j]) {
+            gap_b.push(&b[j]);
+            j += 1;
+        } else {
+            gap_a.push(&a[i]);
+            i += 1;
+        }
     }
-    if heard.eq_ignore_ascii_case(wanted) || heard.to_lowercase() == wanted.to_lowercase() {
-        return None;
-    }
-    Some((heard.clone(), wanted.clone()))
+    flush(&mut gap_a, &mut gap_b);
+    changes
 }
 
 fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
@@ -369,25 +406,42 @@ mod tests {
     #[test]
     fn one_substituted_word_is_offered_as_a_spoken_form() {
         assert_eq!(
-            single_word_change("Open Grappify, please.", "Open graphify, please."),
-            Some(("Grappify".into(), "graphify".into()))
+            word_changes("Open Grappify, please.", "Open graphify, please."),
+            vec![("Grappify".into(), "graphify".into())]
         );
         // Punctuation around the word is not part of it.
         assert_eq!(
-            single_word_change("It was Lata.", "It was Lathe."),
-            Some(("Lata".into(), "Lathe".into()))
+            word_changes("It was Lata.", "It was Lathe."),
+            vec![("Lata".into(), "Lathe".into())]
+        );
+    }
+
+    /// A real correction rarely touches one word only: it drops a filler, fixes a
+    /// comma, and swaps a name or two, all at once.
+    #[test]
+    fn every_swap_in_a_larger_correction_is_found() {
+        assert_eq!(
+            word_changes(
+                "So I asked cloud, um, to port it to rest.",
+                "So I asked Claude to port it to Rust."
+            ),
+            vec![
+                ("cloud".into(), "Claude".into()),
+                ("rest".into(), "Rust".into())
+            ]
         );
     }
 
     #[test]
-    fn anything_but_one_word_is_not() {
-        assert_eq!(single_word_change("a b c", "a b c"), None, "nothing changed");
-        assert_eq!(single_word_change("a b c", "a x y"), None, "two words");
-        assert_eq!(single_word_change("a b c", "a b"), None, "a word removed");
-        assert_eq!(single_word_change("a b c", "a b c d"), None, "a word added");
-        assert_eq!(single_word_change("a lathe c", "a Lathe c"), None, "case only");
-        assert_eq!(single_word_change("a b, c", "a b. c"), None, "punctuation only");
-        assert_eq!(single_word_change("a b c", "a , c"), None, "replaced by nothing");
+    fn nothing_but_a_one_for_one_swap_is_offered() {
+        assert!(word_changes("a b c", "a b c").is_empty(), "nothing changed");
+        assert!(word_changes("a b c", "a b").is_empty(), "a word removed");
+        assert!(word_changes("a b c", "a b c d").is_empty(), "a word added");
+        assert!(word_changes("a lathe c", "a Lathe c").is_empty(), "case only");
+        assert!(word_changes("a b, c", "a b. c").is_empty(), "punctuation only");
+        assert!(word_changes("a b c", "a , c").is_empty(), "replaced by nothing");
+        assert!(word_changes("a b c d", "a x y d").is_empty(), "two words for two");
+        assert!(word_changes("a b d", "a x y d").is_empty(), "one word for two");
     }
 
     #[test]

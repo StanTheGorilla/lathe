@@ -1,0 +1,38 @@
+{"text": "I asked cloud about it and it said no.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Can you ask cloud to review this pull request?", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Cloud wrote most of this function.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "I pasted the error into cloud code.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Cloud Opus is better at long refactors.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Tell cloud to keep the tests passing.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "We deploy everything to the cloud.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "The cloud server was down for an hour.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Our photos are backed up in the cloud.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "There was a dark cloud over the hills.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Cloud storage costs went up again.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Move the database to a cloud provider.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "It will be cloudy tomorrow.", "heard": "cloudy", "term": "Claude", "named": false, "want": "heard"}
+{"text": "I'll do the rest tomorrow.", "heard": "rest", "term": "Rust", "named": false, "want": "heard"}
+{"text": "Take a rest before the next meeting.", "heard": "rest", "term": "Rust", "named": false, "want": "heard"}
+{"text": "The rest of the team agreed.", "heard": "rest", "term": "Rust", "named": false, "want": "heard"}
+{"text": "I rewrote the parser in rest.", "heard": "rest", "term": "Rust", "named": false, "want": "term"}
+{"text": "The rest compiler is complaining about lifetimes.", "heard": "rest", "term": "Rust", "named": false, "want": "term"}
+{"text": "Is rest faster than Go for this?", "heard": "rest", "term": "Rust", "named": false, "want": "term"}
+{"text": "I roast my own coffee beans.", "heard": "roast", "term": "Rust", "named": false, "want": "heard"}
+{"text": "Please vote before Friday.", "heard": "vote", "term": "Vite", "named": false, "want": "heard"}
+{"text": "The vote was close.", "heard": "vote", "term": "Vite", "named": false, "want": "heard"}
+{"text": "The committee meets on Monday.", "heard": "committee", "term": "commit", "named": false, "want": "heard"}
+{"text": "Both branches failed the build.", "heard": "branches", "term": "branch", "named": false, "want": "heard"}
+{"text": "Send me the code when it compiles.", "heard": "code", "term": "CUDA", "named": false, "want": "heard"}
+{"text": "The code review took all afternoon.", "heard": "code", "term": "CUDA", "named": false, "want": "heard"}
+{"text": "The kernel runs on code cores.", "heard": "code", "term": "CUDA", "named": false, "want": "term"}
+{"text": "Install the code toolkit before building llama.cpp.", "heard": "code", "term": "CUDA", "named": false, "want": "term"}
+{"text": "Leave the door open.", "heard": "open", "term": "OpenAI", "named": false, "want": "heard"}
+{"text": "Open the settings window.", "heard": "open", "term": "OpenAI", "named": false, "want": "heard"}
+{"text": "Watch the video I sent you.", "heard": "video", "term": "Vite", "named": false, "want": "heard"}
+{"text": "The lender approved the loan.", "heard": "lender", "term": "linter", "named": false, "want": "heard"}
+{"text": "Run the lender before you commit.", "heard": "lender", "term": "linter", "named": false, "want": "term"}
+{"text": "Reset the counter to zero.", "heard": "reset", "term": "Rust", "named": false, "want": "heard"}
+{"text": "He signed the contract.", "heard": "signed", "term": "Sonnet", "named": false, "want": "heard"}
+{"text": "Oops, I forgot the attachment.", "heard": "oops", "term": "Opus", "named": false, "want": "heard"}
+{"text": "Print it to standard stereo.", "heard": "stereo", "term": "stderr", "named": false, "want": "term"}
+{"text": "Turn up the stereo.", "heard": "stereo", "term": "stderr", "named": false, "want": "heard"}
