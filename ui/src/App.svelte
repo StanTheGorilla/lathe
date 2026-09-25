@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { loadConfig, saveConfig, configPath, takeSection } from "./api.js";
   import Presets from "./sections/Presets.svelte";
@@ -57,12 +57,23 @@
   let active = $state("presets");
   let config = $state(null);
   let path = $state("");
-  let dirty = $state(false);
-  let saving = $state(false);
   let error = $state("");
-  // The file changed underneath unsaved edits: a tray switch, or a hand edit. Saving
-  // would write the stale copy back over it, so say so and offer the fresh one.
-  let stale = $state(false);
+  // Every change saves itself: at once for a click, a toggle or a pick, and half a
+  // second after the last keystroke for typing, so a word is not written letter by
+  // letter. Leaving the field, or the window, writes whatever is still waiting.
+  const TYPING_MS = 500;
+  let timer = null;
+  let dirty = false;
+  let inflight = null;
+  let saveError = $state("");
+  // The config as the core holds it after this window's last save. The core rewrites
+  // config.toml and says so on every save, this window's own included; a reload that
+  // matches this is that echo, and must not rebuild the page under the user's hands.
+  let known = "";
+  // Bumped only when the config changed outside this window (a tray switch, a hand
+  // edit): the section is rebuilt then, so a place it kept in a list (which preset,
+  // which set) cannot point past the end of a list that just got shorter.
+  let generation = $state(0);
 
   const Current = $derived(SECTIONS.find((s) => s.id === active).component);
 
@@ -77,6 +88,7 @@
     (async () => {
       try {
         config = await loadConfig();
+        known = JSON.stringify(config);
         path = await configPath();
         await showRequested();
       } catch (e) {
@@ -84,44 +96,93 @@
       }
     })();
     const unlistenShow = listen("show-section", showRequested);
-    // The core emits this after every reload of config.toml, including the one our
-    // own save triggers. With nothing edited here, just take the new copy.
-    const unlisten = listen("config-reloaded", () => {
-      if (saving) return;
-      if (dirty) stale = true;
-      else revert();
-    });
+    const unlisten = listen("config-reloaded", reloaded);
+    const leave = () => flush();
+    const hidden = () => document.visibilityState === "hidden" && flush();
+    document.addEventListener("focusout", leave);
+    document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("beforeunload", leave);
     return () => {
       unlisten.then((f) => f());
       unlistenShow.then((f) => f());
+      document.removeEventListener("focusout", leave);
+      document.removeEventListener("visibilitychange", hidden);
+      window.removeEventListener("beforeunload", leave);
     };
   });
 
-  function touched() {
-    dirty = true;
-  }
+  const busy = () => timer !== null || inflight !== null || dirty;
 
-  async function save() {
-    saving = true;
-    error = "";
+  async function reloaded() {
+    // An edit still on its way here wins: the next save writes it.
+    if (busy()) return;
+    let fresh;
     try {
-      await saveConfig(config);
-      dirty = false;
+      fresh = await loadConfig();
     } catch (e) {
       error = String(e);
-    } finally {
-      saving = false;
+      return;
+    }
+    if (busy()) return;
+    const json = JSON.stringify(fresh);
+    // This window's own save coming back, or a copy of what it already shows.
+    if (json === known || json === JSON.stringify($state.snapshot(config))) {
+      known = json;
+      return;
+    }
+    known = json;
+    const scroller = document.querySelector(".pane-scroll");
+    const top = scroller?.scrollTop ?? 0;
+    config = fresh;
+    generation++;
+    await tick();
+    if (scroller) scroller.scrollTop = top;
+    // A section that fills in after loading grows under the restored position; put it
+    // back once more when it has.
+    setTimeout(() => scroller && (scroller.scrollTop = top), 150);
+  }
+
+  // Sections call this after changing the config. The event being handled says how:
+  // `input` is typing (or dragging a slider), everything else is a decision made.
+  function changed() {
+    dirty = true;
+    clearTimeout(timer);
+    timer = null;
+    if (window.event?.type === "input") {
+      timer = setTimeout(() => {
+        timer = null;
+        flush();
+      }, TYPING_MS);
+    } else {
+      flush();
     }
   }
 
-  async function revert() {
+  // Writes anything waiting, and resolves once it is on disk: true when it all saved.
+  async function flush() {
+    clearTimeout(timer);
+    timer = null;
+    // One save at a time, in order. A change made while one is in flight goes out
+    // in the next.
+    while (inflight) await inflight.catch(() => {});
+    if (!dirty) return !saveError;
+    dirty = false;
+    const snapshot = $state.snapshot(config);
+    inflight = (async () => {
+      await saveConfig(snapshot);
+      known = JSON.stringify(await loadConfig());
+    })();
     try {
-      config = await loadConfig();
-      dirty = false;
-      stale = false;
-      error = "";
+      await inflight;
+      saveError = "";
+      return true;
     } catch (e) {
-      error = String(e);
+      // Kept as unsaved, so Retry, or the next change, sends it again.
+      dirty = true;
+      saveError = String(e);
+      return false;
+    } finally {
+      inflight = null;
     }
   }
 </script>
@@ -175,31 +236,18 @@
       {/if}
 
       {#if config}
-        <!-- Revert and a reload from the tray replace the whole config. A section keeps
-             its own place in a list (which preset, which set); remount it so that place
-             cannot point past the end of a list that just got shorter. -->
-        {#key config}
-          <Current bind:config onchange={touched} />
+        {#key generation}
+          <Current bind:config onchange={changed} saveNow={flush} />
         {/key}
       {:else if !error}
         <p class="subtitle">Loading configuration.</p>
       {/if}
     </div>
 
-    {#if dirty}
-      <div class="savebar">
-        <button class="primary" onclick={save} disabled={saving}>
-          {saving ? "Saving" : "Save changes"}
-        </button>
-        <button onclick={revert} disabled={saving}>Revert</button>
-        <span class="hint" style="margin:0">
-          {#if stale}
-            The file changed outside this window since you started editing. Saving
-            overwrites that; Revert loads it.
-          {:else}
-            The core reloads the file automatically.
-          {/if}
-        </span>
+    {#if saveError}
+      <div class="savebar bad" role="alert">
+        <span>Your last change is not saved: {saveError}</span>
+        <button onclick={() => flush()}>Retry</button>
       </div>
     {/if}
   </main>

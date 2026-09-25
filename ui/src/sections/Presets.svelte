@@ -81,7 +81,16 @@
     onchange();
   }
 
+  // The name as typed. It reaches the config only while it is a usable one -- not
+  // empty, not another preset's -- because every change saves itself, and the tray
+  // and hotkeys find a preset by its name: half-typed, "Prompt 2" is "Prompt", and
+  // the tray would follow it to the other preset.
+  let draft = $state(null);
+  const typedName = $derived(draft ?? preset.name);
+
   function rename(name) {
+    draft = name;
+    if (!name.trim() || config.presets.some((p, i) => i !== index && p.name === name)) return;
     const was = preset.name;
     config.presets[index].name = name;
     // The tray selection follows the preset it named, not the name.
@@ -99,10 +108,10 @@
   }
 
   const nameClash = $derived(
-    !preset.name.trim()
-      ? "A preset needs a name."
-      : config.presets.some((p, i) => i !== index && p.name === preset.name)
-        ? "Another preset already has this name; the tray and hotkeys go by name."
+    !typedName.trim()
+      ? "A preset needs a name. Until it has one, it keeps its last."
+      : config.presets.some((p, i) => i !== index && p.name === typedName)
+        ? "Another preset already has this name; the tray and hotkeys go by name, so this one keeps its last."
         : "",
   );
 
@@ -190,7 +199,7 @@
 
 <div class="preset-tabs">
   {#each config.presets as p, i}
-    <button aria-pressed={index === i} onclick={() => { index = i; confirmingDelete = false; }}>
+    <button aria-pressed={index === i} onclick={() => { index = i; confirmingDelete = false; draft = null; }}>
       {p.name}
     </button>
   {/each}
@@ -204,8 +213,9 @@
       class="mono set-name"
       id="preset-name"
       type="text"
-      value={preset.name}
+      value={typedName}
       oninput={(e) => rename(e.currentTarget.value)}
+      onblur={() => (draft = null)}
     />
     <button class="quiet icon" data-tip="Clone this preset" aria-label="Clone this preset" onclick={() => addPreset(preset)}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -230,7 +240,7 @@
 {#if confirmingDelete}
   <div class="status bad">
     Delete the &ldquo;{preset.name}&rdquo; preset? Its hotkey and replacement rules go
-    with it. Revert at the bottom undoes it until you save.
+    with it, and this cannot be undone.
     <div class="row" style="margin-top:8px">
       <button class="primary" onclick={removePreset}>Delete</button>
       <button onclick={() => (confirmingDelete = false)}>Cancel</button>

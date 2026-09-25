@@ -63,8 +63,8 @@
   }
 
   // Adds the mishearing as a spoken form of the wanted word in the chosen set,
-  // creating the word if the set does not have it. Written by the save bar like any
-  // other vocabulary edit.
+  // creating the word if the set does not have it. Saved like any other vocabulary
+  // edit.
   function learn(offer) {
     const set = config.vocabulary.sets.find((s) => s.name === offerSet);
     if (!set) return;
@@ -228,7 +228,7 @@
       </div>
     {/each}
     <p class="hint" style="margin:6px 0 0">
-      Each lands in the vocabulary as a spoken form; Save changes below writes it. An
+      Each lands in the vocabulary as a spoken form, saved at once. An
       everyday word, like <span class="mono">cloud</span>, is not swapped blindly: the
       cleanup model reads each sentence both ways and keeps the one that makes sense.
     </p>

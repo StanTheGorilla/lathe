@@ -480,3 +480,10 @@ th {
   margin-bottom: 5px;
   font-weight: 500;
 }
+
+/* Only a save that failed has a bar: success is silent, since every change saves. */
+.savebar.bad {
+  color: var(--clay);
+  border-top-color: var(--clay);
+  justify-content: space-between;
+}
