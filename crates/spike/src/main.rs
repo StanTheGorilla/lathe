@@ -164,6 +164,17 @@ enum Command {
         /// --against-clean. Pass the model with --cleanup-model.
         #[arg(long)]
         instruct: bool,
+        /// Clean through a cloud provider instead: its OpenAI-compatible address.
+        /// The key, if it needs one, comes from the LATHE_API_KEY environment
+        /// variable, so it never lands in shell history or a file.
+        #[arg(long, requires = "cloud_model")]
+        cloud_url: Option<String>,
+        /// The model to ask at --cloud-url, as the provider names it.
+        #[arg(long)]
+        cloud_model: Option<String>,
+        /// The request shape --cloud-url speaks: "openai" or "anthropic".
+        #[arg(long, default_value = "openai")]
+        cloud_api: String,
     },
     /// Put the vocabulary's context questions to a cleanup model and score its answers.
     ///
@@ -179,6 +190,12 @@ enum Command {
         /// the English cleanup model.
         #[arg(long)]
         instruct: bool,
+        /// Score without telling the model the vocabulary, as 0.1.15 did.
+        #[arg(long)]
+        no_terms: bool,
+        /// Tell the model only the term in question, not the whole vocabulary.
+        #[arg(long)]
+        only_asked: bool,
     },
     /// Duck other applications for a few seconds, then restore. Verifies the ducking
     /// path without needing a dictation.
@@ -451,8 +468,13 @@ fn main() -> Result<()> {
             against_clean,
             lang,
             instruct,
+            cloud_url,
+            cloud_model,
+            cloud_api,
         } => {
+            let cloud = cloud_url.zip(cloud_model);
             cleanup_eval(
+                cloud.as_ref().map(|(u, m)| (u.as_str(), m.as_str(), cloud_api.as_str())),
                 &cli.models,
                 &cli.cleanup_model,
                 cli.gpu,
@@ -465,13 +487,13 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Command::ContextEval { set, instruct } => {
+        Command::ContextEval { set, instruct, no_terms, only_asked } => {
             let (model, flavour) = if instruct {
                 (&cli.multilingual_model, cleanup::Flavour::Instruct)
             } else {
                 (&cli.cleanup_model, cleanup::Flavour::S1Mini)
             };
-            context_eval(&cli.models.join(model), flavour, cli.gpu, &set)?;
+            context_eval(&cli.models.join(model), flavour, cli.gpu, &set, !no_terms, only_asked)?;
         }
 
         Command::Duck { secs, level } => {
@@ -688,8 +710,13 @@ fn context_eval(
     flavour: cleanup::Flavour,
     gpu: i32,
     set: &Path,
+    with_terms: bool,
+    only_asked: bool,
 ) -> Result<()> {
     use lathe_core::vocabulary::{Set, Term, Vocabulary};
+
+    // What a dictation tells the judge: the shipped vocabulary, as the engine passes it.
+    let shipped = Vocabulary::default().terms(64);
 
     let items: Vec<ContextItem> = read_jsonl(set)?;
     let backend = LlamaBackend::init()?;
@@ -713,14 +740,31 @@ fn context_eval(
             }],
             ..Vocabulary::default()
         };
+        let terms = if with_terms && only_asked {
+            vec![item.term.clone()]
+        } else if with_terms {
+            let mut t = shipped.clone();
+            if !t.contains(&item.term) {
+                t.push(item.term.clone());
+            }
+            t
+        } else {
+            Vec::new()
+        };
         let mut asked = false;
         let mut failure = None;
         vocabulary.correct_in_context(&item.text, &mut |choice| {
-            if !choice.heard.eq_ignore_ascii_case(&item.heard) {
+            // Only the first such word is the one the line is about.
+            if asked || !choice.heard.eq_ignore_ascii_case(&item.heard) {
                 return None;
             }
             asked = true;
-            match model.log_likelihoods(&backend, &[&choice.as_heard, &choice.as_term], threads()) {
+            match model.log_likelihoods(
+                &backend,
+                &[&choice.as_heard, &choice.as_term],
+                &terms,
+                threads(),
+            ) {
                 Ok(s) => scores.push(ContextScore {
                     text: item.text.clone(),
                     heard: item.heard.clone(),
@@ -789,6 +833,25 @@ fn context_eval(
             if margin == default_margin { "  <- current default" } else { "" }
         );
     }
+    // Named forms on their own, against a threshold of their own: below zero leans
+    // toward the term the user named.
+    println!("\n{:>9}  {:>11}  {:>13}  {:>13}", "named at", "named", "wanted term", "wanted heard");
+    for threshold in [-6.0f32, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0] {
+        let named: Vec<_> = scores.iter().filter(|s| s.named).collect();
+        let count = |want: Option<bool>| {
+            let pool: Vec<_> = named.iter().filter(|s| want.is_none_or(|w| s.want_term == w)).collect();
+            let ok = pool.iter().filter(|s| (s.delta > threshold) == s.want_term).count();
+            format!("{ok}/{}", pool.len())
+        };
+        println!(
+            "{:>9.1}  {:>11}  {:>13}  {:>13}{}",
+            threshold,
+            count(None),
+            count(Some(true)),
+            count(Some(false)),
+            if threshold == 0.0 { "  <- current" } else { "" }
+        );
+    }
     println!("\n{per_question:.0} ms per question, both readings together");
     Ok(())
 }
@@ -832,6 +895,7 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
 }
 
 fn cleanup_eval(
+    cloud: Option<(&str, &str, &str)>,
     models: &Path,
     cleanup_model: &str,
     gpu: i32,
@@ -843,6 +907,78 @@ fn cleanup_eval(
     instruct: bool,
 ) -> Result<()> {
     let items: Vec<EvalItem> = read_jsonl(set)?;
+    let outputs = match cloud {
+        Some((url, model, api)) => cloud_cleanup_outputs(url, model, api, items, lang)?,
+        None => local_cleanup_outputs(models, cleanup_model, gpu, items, lang, instruct)?,
+    };
+
+    let mut lines = String::new();
+    for o in &outputs {
+        lines.push_str(&serde_json::to_string(o)?);
+        lines.push('\n');
+    }
+    std::fs::write(out, lines)?;
+    let label = cloud.map_or(cleanup_model, |(_, m, _)| m);
+    score_cleanup(label, &outputs, reference, against_clean)
+}
+
+/// The eval set cleaned by a cloud model, with the prompt the app sends it.
+fn cloud_cleanup_outputs(
+    url: &str,
+    model: &str,
+    api: &str,
+    items: Vec<EvalItem>,
+    lang: &str,
+) -> Result<Vec<EvalOutput>> {
+    use lathe_core::cleanup::{build_instruct_prompt_for, Turns};
+    use lathe_core::config::{Api, Provider};
+
+    let provider = Provider {
+        id: "eval".into(),
+        name: "eval".into(),
+        base_url: url.into(),
+        api: match api {
+            "openai" => Api::OpenAi,
+            "anthropic" => Api::Anthropic,
+            other => anyhow::bail!("--cloud-api is openai or anthropic, not '{other}'"),
+        },
+        models: vec![],
+        timeout_secs: 120,
+    };
+    let key = std::env::var("LATHE_API_KEY").ok();
+    let client = lathe_core::cloud::ChatClient::new(&provider, model, key)?;
+    let language = lathe_core::engine::language_name(lang);
+    let total = items.len();
+    let mut outputs = Vec::with_capacity(total);
+    for (i, item) in items.into_iter().enumerate() {
+        let prompt = build_instruct_prompt_for(
+            Turns::Plain, &item.raw, language, item.styling, item.structure, item.context, &[], &[],
+        );
+        let started = std::time::Instant::now();
+        let cleaned = client.complete(&prompt, lathe_core::cloud::max_tokens_for(&item.raw, 2.0))?;
+        eprint!("\r{}/{total}", i + 1);
+        outputs.push(EvalOutput {
+            item,
+            cleaned,
+            prompt_tokens: 0,
+            generated_tokens: 0,
+            setup_ms: 0,
+            prompt_ms: 0,
+            infer_ms: started.elapsed().as_millis(),
+        });
+    }
+    eprintln!();
+    Ok(outputs)
+}
+
+fn local_cleanup_outputs(
+    models: &Path,
+    cleanup_model: &str,
+    gpu: i32,
+    items: Vec<EvalItem>,
+    lang: &str,
+    instruct: bool,
+) -> Result<Vec<EvalOutput>> {
     let flavour = if lang.eq_ignore_ascii_case("en") && !instruct {
         cleanup::Flavour::S1Mini
     } else {
@@ -899,19 +1035,21 @@ fn cleanup_eval(
         });
     }
     eprintln!();
+    Ok(outputs)
+}
 
-    let mut lines = String::new();
-    for o in &outputs {
-        lines.push_str(&serde_json::to_string(o)?);
-        lines.push('\n');
-    }
-    std::fs::write(out, lines)?;
-
+fn score_cleanup(
+    label: &str,
+    outputs: &[EvalOutput],
+    reference: Option<&Path>,
+    against_clean: bool,
+) -> Result<()> {
+    let total = outputs.len();
     let n = total as f64;
     let sum = |f: &dyn Fn(&EvalOutput) -> u128| outputs.iter().map(f).sum::<u128>() as f64;
     let generated = sum(&|o| o.generated_tokens as u128);
     let decode_ms = sum(&|o| o.infer_ms - o.prompt_ms);
-    println!("{cleanup_model}: {total} inputs");
+    println!("{label}: {total} inputs");
     println!(
         "  per dictation: setup {:.1}ms, prompt {:.1}ms ({:.0} tokens), decode {:.1}ms ({:.2}ms/token, {:.0} tokens)",
         sum(&|o| o.setup_ms) / n,
@@ -935,7 +1073,7 @@ fn cleanup_eval(
         if runs.len() != total {
             anyhow::bail!("reference has {} outputs, this run {total}", runs.len());
         }
-        for (i, (r, h)) in runs.iter().zip(&outputs).enumerate() {
+        for (i, (r, h)) in runs.iter().zip(outputs).enumerate() {
             if r.item.raw != h.item.raw {
                 anyhow::bail!("input {} differs between the reference and this set", i + 1);
             }
@@ -950,7 +1088,7 @@ fn cleanup_eval(
     let mut ref_words = 0usize;
     let mut lost = Vec::new();
     let mut differing: Vec<(usize, usize)> = Vec::new();
-    for (i, (r, h)) in refs.iter().zip(&outputs).enumerate() {
+    for (i, (r, h)) in refs.iter().zip(outputs).enumerate() {
         let rw = words(r);
         let hw = words(&h.cleaned);
         let (dist, _) = compare(&rw, &hw);

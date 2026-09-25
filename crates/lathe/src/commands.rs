@@ -3,6 +3,7 @@
 
 use lathe_core::audio;
 use lathe_core::config::Config;
+use lathe_core::secrets::{self, KeyStatus, KeyStore, OsKeyStore};
 use serde::Serialize;
 use std::sync::mpsc;
 use tauri::State;
@@ -27,8 +28,153 @@ pub fn save_config(config: Config, state: State<'_, AppState>) -> Reply<()> {
     // and reload it -- writing memory first would let the two diverge if the write fails.
     let text = config.to_toml().map_err(fail)?;
     std::fs::write(&state.config_path, text).map_err(fail)?;
+    let removed: Vec<String> = {
+        let old = state.config.lock().unwrap();
+        old.providers
+            .iter()
+            .filter(|p| config.provider(&p.id).is_none())
+            .map(|p| p.id.clone())
+            .collect()
+    };
     *state.config.lock().unwrap() = config;
+    // A provider removed and saved takes its key with it: a key for nothing is a key
+    // nobody remembers is there.
+    for id in removed {
+        if let Err(e) = OsKeyStore.delete(&id) {
+            eprintln!("providers: could not remove the key of '{id}': {e:#}");
+        }
+    }
     Ok(())
+}
+
+/// Provider ids are made by the settings window; anything else is refused before it
+/// becomes the name of a credential.
+fn provider_id(id: &str) -> Reply<&str> {
+    let ok = !id.is_empty()
+        && id.len() <= 40
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if ok {
+        Ok(id)
+    } else {
+        Err(format!("'{id}' is not a provider id"))
+    }
+}
+
+/// Whether a provider has a key, and its last four characters. Never the key: the
+/// window gets that only from `reveal_provider_key`, when the user asks to see it.
+#[tauri::command]
+pub fn provider_key_status(id: String) -> Reply<KeyStatus> {
+    let key = OsKeyStore.get(provider_id(&id)?).map_err(fail)?;
+    Ok(KeyStatus::of(key.as_deref()))
+}
+
+/// Saves a key straight to the credential store, and checks it is really there.
+#[tauri::command]
+pub fn set_provider_key(id: String, key: String) -> Reply<KeyStatus> {
+    let id = provider_id(&id)?;
+    let key = key.trim();
+    if key.is_empty() {
+        OsKeyStore.delete(id).map_err(fail)?;
+    } else {
+        secrets::set_verified(&OsKeyStore, id, key).map_err(fail)?;
+    }
+    Ok(KeyStatus::of(Some(key)))
+}
+
+/// The key itself, for the Show button. The window hides it again after 30 seconds.
+#[tauri::command]
+pub fn reveal_provider_key(id: String) -> Reply<String> {
+    OsKeyStore
+        .get(provider_id(&id)?)
+        .map_err(fail)?
+        .ok_or_else(|| "no key is saved for this provider".to_string())
+}
+
+#[tauri::command]
+pub fn delete_provider_key(id: String) -> Reply<()> {
+    OsKeyStore.delete(provider_id(&id)?).map_err(fail)
+}
+
+/// The provider as saved. The key is read from the credential store by id, and goes
+/// only to the address in the saved config: an address typed into the window but not
+/// saved is refused, so nothing in the window can point the saved key somewhere else.
+/// The window saves before it asks, so a mismatch means that save failed.
+fn saved_provider(
+    provider: &lathe_core::config::Provider,
+    state: &AppState,
+) -> Reply<lathe_core::config::Provider> {
+    provider_id(&provider.id)?;
+    let saved = state.config.lock().unwrap().provider(&provider.id).cloned();
+    match saved {
+        Some(saved)
+            if saved.base_url.trim() == provider.base_url.trim() && saved.api == provider.api =>
+        {
+            Ok(saved)
+        }
+        _ => Err("The address is not saved yet, and only a saved address gets the key. \
+                  Try again in a moment."
+            .into()),
+    }
+}
+
+/// One small request to a model, so a provider can be checked before a dictation
+/// depends on it.
+#[tauri::command]
+pub async fn test_cloud_model(
+    provider: lathe_core::config::Provider,
+    model: String,
+    kind: lathe_core::config::CloudKind,
+    state: State<'_, AppState>,
+) -> Reply<String> {
+    let provider = saved_provider(&provider, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        use lathe_core::config::CloudKind;
+        match kind {
+            CloudKind::Cleanup => {
+                let preset = Config::default().active().clone();
+                let out = lathe_core::engine::cloud_clean(
+                    &provider,
+                    &model,
+                    &preset,
+                    "um so this is a test of the the cleanup model",
+                    "en",
+                    &[],
+                    &[],
+                )?;
+                Ok(format!("It answered: {out}"))
+            }
+            CloudKind::Speech => {
+                // One second of silence: enough to prove the address, model and key.
+                let silence = vec![0.0f32; lathe_core::audio::TARGET_RATE as usize];
+                let out = lathe_core::engine::cloud_transcribe(&provider, &model, &silence, "en", &[])?;
+                Ok(if out.is_empty() {
+                    "It answered (with nothing, as expected for a second of silence).".into()
+                } else {
+                    format!("It answered: {out}")
+                })
+            }
+        }
+    })
+    .await
+    .map_err(fail)?
+    .map_err(|e: anyhow::Error| fail(e))
+}
+
+/// The models a provider offers, from its own list, for the window to pick from.
+/// Same rule as Test: the saved address, the stored key.
+#[tauri::command]
+pub async fn list_provider_models(
+    provider: lathe_core::config::Provider,
+    state: State<'_, AppState>,
+) -> Reply<Vec<lathe_core::cloud::Listed>> {
+    let provider = saved_provider(&provider, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = OsKeyStore.get(&provider.id)?;
+        lathe_core::cloud::list_models(&provider, key)
+    })
+    .await
+    .map_err(fail)?
+    .map_err(|e: anyhow::Error| fail(e))
 }
 
 #[tauri::command]

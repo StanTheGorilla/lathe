@@ -340,6 +340,12 @@ fn run(args: &[String]) -> Result<()> {
             commands::install_update,
             commands::setup_status,
             commands::take_section,
+            commands::provider_key_status,
+            commands::set_provider_key,
+            commands::reveal_provider_key,
+            commands::delete_provider_key,
+            commands::test_cloud_model,
+            commands::list_provider_models,
         ])
         .setup(move |app| {
             build_tray(app.handle(), &config.lock().unwrap(), &bindings)?;
@@ -704,12 +710,17 @@ fn bindings_for(config: &Config) -> Result<Vec<Bound>> {
 
 #[cfg(windows)]
 pub fn notify_user(title: &str, body: &str) {
-    let _ = tauri_winrt_notification::Toast::new(
+    // A toast that fails to show says nothing, and the user never learns what it was
+    // about; the log is the only place left to say both.
+    if let Err(e) = tauri_winrt_notification::Toast::new(
         tauri_winrt_notification::Toast::POWERSHELL_APP_ID,
     )
     .title(title)
     .text1(body)
-    .show();
+    .show()
+    {
+        eprintln!("could not show the notification '{title}': {e:?}");
+    }
 }
 
 /// `osascript` rather than the notification framework: that one refuses to post from
@@ -721,9 +732,11 @@ pub fn notify_user(title: &str, body: &str) {
         applescript_escape(body),
         applescript_escape(title)
     );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .status();
+    match std::process::Command::new("osascript").args(["-e", &script]).status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("could not show the notification '{title}': osascript {status}"),
+        Err(e) => eprintln!("could not show the notification '{title}': {e}"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -735,9 +748,14 @@ fn applescript_escape(s: &str) -> String {
 /// desktop without one has nowhere to show this anyway.
 #[cfg(target_os = "linux")]
 pub fn notify_user(title: &str, body: &str) {
-    let _ = std::process::Command::new("notify-send")
+    match std::process::Command::new("notify-send")
         .args(["--app-name=Lathe", title, body])
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("could not show the notification '{title}': notify-send {status}"),
+        Err(e) => eprintln!("could not show the notification '{title}': {e}"),
+    }
 }
 
 /// Brief 4.1 and 5.7: the adapter picker and the device dropdowns need names.

@@ -36,3 +36,10 @@ export const downloadUpdate = () => invoke("download_update");
 export const installUpdate = () => invoke("install_update");
 export const setupStatus = () => invoke("setup_status");
 export const takeSection = () => invoke("take_section");
+export const providerKeyStatus = (id) => invoke("provider_key_status", { id });
+export const setProviderKey = (id, key) => invoke("set_provider_key", { id, key });
+export const revealProviderKey = (id) => invoke("reveal_provider_key", { id });
+export const deleteProviderKey = (id) => invoke("delete_provider_key", { id });
+export const testCloudModel = (provider, model, kind) =>
+  invoke("test_cloud_model", { provider, model, kind });
+export const listProviderModels = (provider) => invoke("list_provider_models", { provider });

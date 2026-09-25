@@ -1,0 +1,10 @@
+{"raw": "this is very, very important so please read it twice", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "This is very, very important, so please read it twice."}
+{"raw": "I will never, ever use that library again", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "I will never, ever use that library again."}
+{"raw": "the new build is really really fast on my machine", "styling": "semi-casual", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "the new build is really really fast on my machine"}
+{"raw": "no, no, no, don't delete the config file", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "No, no, no, don't delete the config file."}
+{"raw": "it was a long, long day and the tests still fail", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "It was a long, long day, and the tests still fail."}
+{"raw": "we need this done very very soon", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "We need this done very, very soon."}
+{"raw": "um I I think the the problem is in the parser", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "stammer", "clean": "I think the problem is in the parser."}
+{"raw": "can you can you check the the log file", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "stammer", "clean": "Can you check the log file?"}
+{"raw": "so we should uh we should move the button to the left", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "stammer", "clean": "We should move the button to the left."}
+{"raw": "it's much much better than the old version, really", "styling": "semi-formal", "structure": "prose", "context": "general", "kind": "emphasis", "clean": "It's much, much better than the old version, really."}

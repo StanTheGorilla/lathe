@@ -1,5 +1,6 @@
 <script>
   import { onMount } from "svelte";
+  import { displayName, incomplete } from "../providers.js";
   import {
     listDevices,
     modelStatus,
@@ -256,10 +257,36 @@
     }
   }
 
+  // Picking a local model clears the slot's cloud choice; picking a cloud one leaves
+  // the local file chosen underneath it, as the fallback.
   function choose(field, file) {
     config.models[field] = file;
+    config.models[field + "_cloud"] = null;
     onchange();
   }
+
+  function chooseCloud(field, cloud) {
+    config.models[field + "_cloud"] = { provider: cloud.provider, model: cloud.model };
+    onchange();
+  }
+
+  // The models added on the Providers page, as cards for a slot of this kind.
+  function cloudOptions(kind) {
+    return (config.providers ?? []).flatMap((p) =>
+      (p.models ?? [])
+        .filter((m) => m.kind === kind && m.name.trim())
+        .map((m) => ({
+          cloud: { provider: p.id, model: m.name },
+          label: m.label || m.name,
+          note: incomplete(p)
+            ? `${displayName(p)} is not finished: it needs a name and an address on the Providers page.`
+            : `${displayName(p)}${m.label ? ` (${m.name})` : ""}, in the cloud. What you say leaves this computer.`,
+          size: "",
+        })),
+    );
+  }
+
+  const sameCloud = (a, b) => !!a && !!b && a.provider === b.provider && a.model === b.model;
 </script>
 
 <h1>Models</h1>
@@ -276,18 +303,19 @@
 />
 
 {#snippet card(field, o, onpick)}
-  {@const chosen = config.models[field] === o.file}
-  {@const have = present(o.file)}
+  {@const current = config.models[field + "_cloud"]}
+  {@const chosen = o.cloud ? sameCloud(current, o.cloud) : !current && config.models[field] === o.file}
+  {@const have = o.cloud ? true : present(o.file)}
   {@const downloading = progress && progress.file === o.file && !progress.finished}
   <div class="choice" class:picked={chosen}>
     <button
       class="choice-pick"
       aria-pressed={chosen}
-      onclick={() => { choose(field, o.file); onpick?.(); }}
+      onclick={() => { o.cloud ? chooseCloud(field, o.cloud) : choose(field, o.file); onpick?.(); }}
       disabled={!have && !chosen}
     >
       <span class="choice-head">
-        <span class="choice-name">{o.label}</span>
+        <span class="choice-name">{#if o.cloud}{@render cloudIcon()}{/if}{o.label}</span>
         <span class="choice-size mono">{o.size}</span>
       </span>
       <span class="choice-note">{o.note}</span>
@@ -309,14 +337,32 @@
 <!-- A slot shows the model in use as a picker: the card opens a menu of the others
      under it. A config that names a file not listed here has nothing to show on its
      own, so it lists them all. -->
-{#snippet slot(title, field, options, subtitle)}
-  {@const picked = options.find((o) => o.file === config.models[field])}
+{#snippet cloudIcon()}
+  <!-- Lucide "cloud", ISC License; see App.svelte. -->
+  <svg class="cloud" viewBox="0 0 24 24" aria-label="cloud model">
+    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+  </svg>
+{/snippet}
+
+{#snippet slot(title, field, localOptions, subtitle, kind)}
+  {@const current = config.models[field + "_cloud"]}
+  {@const local = localOptions.find((o) => o.file === config.models[field])}
+  {@const clouds = cloudOptions(kind)}
+  {@const options = [...localOptions, ...clouds]}
+  {@const picked = current
+    ? clouds.find((o) => sameCloud(o.cloud, current)) ?? {
+        cloud: current,
+        label: current.model,
+        note: "This model is no longer on the Providers page. Pick another.",
+        size: "",
+      }
+    : local}
   {@const others = options.filter((o) => o !== picked)}
   {@const open = openSlot === field}
   <h2>{title}</h2>
   <p class="hint" style="margin:-6px 0 10px">{subtitle}</p>
   {#if picked}
-    {@const have = present(picked.file)}
+    {@const have = picked.cloud ? true : present(picked.file)}
     {@const downloading = progress && progress.file === picked.file && !progress.finished}
     <div class="picker">
       <div class="choice picked">
@@ -327,7 +373,7 @@
           onclick={() => (openSlot = open ? null : field)}
         >
           <span class="choice-head">
-            <span class="choice-name">{picked.label}</span>
+            <span class="choice-name">{#if picked.cloud}{@render cloudIcon()}{/if}{picked.label}</span>
             <span class="choice-size mono">{picked.size}</span>
             <svg class="chevron" class:open viewBox="0 0 24 24" aria-hidden="true">
               <path d="m6 9 6 6 6-6" />
@@ -362,6 +408,32 @@
       {/each}
     </div>
   {/if}
+  {#if current}
+    {#if kind === "speech"}
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={config.models.speech_cloud_fallback}
+          onchange={(e) => { config.models.speech_cloud_fallback = e.currentTarget.checked; onchange(); }}
+        />
+        <span>
+          If the cloud fails, use {local ? local.label : "the local model"} instead
+          <span class="hint" style="margin:0">
+            Off by default, so a failure is reported instead of quietly giving a
+            transcript from a different model. Either way it is not loaded until the
+            cloud fails, so it takes no graphics memory before then. Speech detection
+            always runs here, so silence is never sent.
+          </span>
+        </span>
+      </label>
+    {:else}
+      <p class="hint" style="margin:-2px 0 10px">
+        If the cloud fails, {local ? local.label : "the local model"} cleans it instead, and
+        you get a notification. It is loaded only then, which takes a few seconds once,
+        so until then it takes no graphics memory.
+      </p>
+    {/if}
+  {/if}
 {/snippet}
 
 {@render slot(
@@ -369,6 +441,7 @@
   "whisper",
   SPEECH,
   "Turns what you said into text. The one choice that affects every dictation.",
+  "speech",
 )}
 
 {@render slot(
@@ -376,6 +449,7 @@
   "cleanup",
   [...CLEANUP, ...ENGLISH_GENERAL],
   "Punctuates and tidies English. S1-mini is built for exactly this and is the fastest; Gemma 4 E2B cleans more accurately and is slower.",
+  "cleanup",
 )}
 
 {@render slot(
@@ -383,6 +457,7 @@
   "cleanup_multilingual",
   MULTILINGUAL,
   "A general model doing the same job for languages S1-mini does not cover, and the only one that can rewrite (Presets > Rewrite). Optional; without it non-English speech is recognised but pasted uncleaned.",
+  "cleanup",
 )}
 
 {#if progress && !progress.finished}
@@ -538,83 +613,19 @@
   </table>
 {/if}
 
-<h2>External endpoint</h2>
-<p class="hint" style="margin:-6px 0 12px">
-  Sends audio to a server instead of transcribing here. For a stronger model on a machine
-  with more memory, or a hosted API. Off by default, and the only setting that sends audio
-  anywhere.
-</p>
-
-<label class="check">
-  <input
-    type="checkbox"
-    checked={config.remote_asr.enabled}
-    onchange={(e) => { config.remote_asr.enabled = e.currentTarget.checked; onchange(); }}
-  />
-  <span>
-    Use an external endpoint
-    <span class="hint" style="margin:0">
-      Speech detection still runs locally, so silence is never sent.
-    </span>
-  </span>
-</label>
-
-{#if config.remote_asr.enabled}
-  <div class="field">
-    <label for="url">Base URL</label>
-    <input
-      id="url"
-      class="mono"
-      type="text"
-      placeholder="https://host:8000/v1"
-      value={config.remote_asr.base_url}
-      oninput={(e) => { config.remote_asr.base_url = e.currentTarget.value; onchange(); }}
-    />
-    <p class="hint">
-      Any server exposing <span class="mono">/v1/audio/transcriptions</span>.
-    </p>
-  </div>
-
-  <div class="field">
-    <label for="rmodel">Model name</label>
-    <input
-      id="rmodel"
-      class="mono"
-      type="text"
-      value={config.remote_asr.model}
-      oninput={(e) => { config.remote_asr.model = e.currentTarget.value; onchange(); }}
-    />
-  </div>
-
-  <div class="field">
-    <label for="key">API key</label>
-    <input
-      id="key"
-      class="mono"
-      type="password"
-      value={config.remote_asr.api_key}
-      oninput={(e) => { config.remote_asr.api_key = e.currentTarget.value; onchange(); }}
-    />
-    <p class="hint">Leave empty for a local server. Stored as plain text in config.toml.</p>
-  </div>
-
-  <label class="check">
-    <input
-      type="checkbox"
-      checked={config.remote_asr.fallback_to_local}
-      onchange={(e) => { config.remote_asr.fallback_to_local = e.currentTarget.checked; onchange(); }}
-    />
-    <span>
-      Fall back to the local model if the endpoint fails
-      <span class="hint" style="margin:0">
-        Off by default, so a failure is reported instead of quietly producing a worse
-        transcript from a different model.
-      </span>
-    </span>
-  </label>
-{/if}
-
 <style>
+  .cloud {
+    width: 14px;
+    height: 14px;
+    margin-right: 6px;
+    vertical-align: -2px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
   .choices {
     display: flex;
     flex-direction: column;

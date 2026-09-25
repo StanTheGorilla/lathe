@@ -73,14 +73,26 @@ impl Asr {
         &self.backend
     }
 
+    /// [`Asr::gate_with`], with this model's thread count.
+    pub fn gate(&self, pcm: &[f32], vad_model: &Path, min_speech_ms: u32) -> Result<Option<Gated>> {
+        Self::gate_with(pcm, vad_model, min_speech_ms, self.threads)
+    }
+
     /// Brief 6.1: run Silero before recognition and return only the speech span.
     ///
     /// Amendment A10 still applies: trim to the span between the first and last speech
     /// segment rather than splicing the pauses out, because splicing measurably
     /// degrades transcription.
     ///
-    /// Returns `None` when there is not enough speech to be worth transcribing.
-    pub fn gate(&self, pcm: &[f32], vad_model: &Path, min_speech_ms: u32) -> Result<Option<Gated>> {
+    /// Returns `None` when there is not enough speech to be worth transcribing. Needs
+    /// no speech model: Silero is its own small file, so the gate runs in front of a
+    /// cloud recogniser with nothing else loaded.
+    pub fn gate_with(
+        pcm: &[f32],
+        vad_model: &Path,
+        min_speech_ms: u32,
+        threads: i32,
+    ) -> Result<Option<Gated>> {
         if !vad_model.exists() {
             // Brief section 10: fail loudly rather than skipping the gate, which would
             // reintroduce the hallucination problem 6.1 exists to solve.
@@ -104,7 +116,7 @@ impl Asr {
             0.5,
             min_speech_ms as i32,
             100,
-            self.threads,
+            threads,
             false,
         )
         .map_err(|e| anyhow!("speech detection failed: {e}"))?;

@@ -141,12 +141,7 @@ impl OpenAiCompatBackend {
         );
         let body = multipart_body(&boundary, wav, &self.model, lang, prompt);
 
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
-            .build()
-            .new_agent();
-
-        let mut request = agent
+        let mut request = crate::cloud::agent(self.timeout)
             .post(self.endpoint())
             .header(
                 "Content-Type",
@@ -162,6 +157,15 @@ impl OpenAiCompatBackend {
                 "could not reach the transcription endpoint: {other}"
             )),
         })?;
+        // Not followed (see `cloud::agent`), so say what happened rather than fail to
+        // read an empty redirect as JSON.
+        if response.status().is_redirection() {
+            return Err(Rejected::Other(anyhow!(
+                "the transcription endpoint answered with a redirect (HTTP {}), which is \
+                 not followed so the key goes nowhere else. Check the provider's address.",
+                response.status().as_u16()
+            )));
+        }
 
         let text = response
             .body_mut()
@@ -187,6 +191,11 @@ impl AsrBackend for OpenAiCompatBackend {
         if pcm.is_empty() {
             bail!("no audio to transcribe");
         }
+        crate::cloud::checked_key(&self.endpoint(), self.api_key.clone())?;
+        // Errors go to the log; some servers quote the key back in theirs.
+        let scrub = |e: anyhow::Error| {
+            anyhow!(crate::secrets::scrub(&format!("{e:#}"), self.api_key.as_deref()))
+        };
 
         let wav = wav_bytes(pcm, crate::audio::TARGET_RATE);
         let prompt = hints.join(", ");
@@ -199,9 +208,9 @@ impl AsrBackend for OpenAiCompatBackend {
                     "the transcription endpoint refused the vocabulary prompt (HTTP {code}); \
                      retrying without it"
                 );
-                self.post(&wav, lang, "").map_err(Rejected::into_error)
+                self.post(&wav, lang, "").map_err(Rejected::into_error).map_err(scrub)
             }
-            other => other.map_err(Rejected::into_error),
+            other => other.map_err(Rejected::into_error).map_err(scrub),
         }
     }
 

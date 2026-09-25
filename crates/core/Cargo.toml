@@ -22,6 +22,10 @@ toml = "1"
 # Blocking HTTP for the external transcription endpoint (brief 4.3). Chosen over
 # reqwest because it needs no async runtime; roughly 1MB in the binary.
 ureq = { version = "3", features = ["json"] }
+# Cloud providers' API keys go to the OS credential store, never config.toml. The
+# platform store is picked per target below: without one, keyring silently keeps keys
+# in memory only.
+keyring = "3.6"
 # Verifies model downloads against the SHA-256 Hugging Face publishes for every file.
 # Already in the tree through Tauri, so it costs nothing new.
 sha2 = "0.10"
@@ -38,6 +42,18 @@ sha2 = "0.10"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 llama-cpp-2 = { version = "=0.1.155", features = ["vulkan"] }
 crispasr = { git = "https://github.com/CrispStrobe/CrispASR", tag = "v0.8.31", features = ["vulkan"] }
+
+[target.'cfg(windows)'.dependencies.keyring]
+version = "3.6"
+features = ["windows-native"]
+
+[target.'cfg(target_os = "macos")'.dependencies.keyring]
+version = "3.6"
+features = ["apple-native"]
+
+[target.'cfg(target_os = "linux")'.dependencies.keyring]
+version = "3.6"
+features = ["sync-secret-service", "crypto-rust"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = "=0.1.155", features = ["metal"] }

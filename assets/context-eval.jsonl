@@ -36,3 +36,23 @@
 {"text": "Oops, I forgot the attachment.", "heard": "oops", "term": "Opus", "named": false, "want": "heard"}
 {"text": "Print it to standard stereo.", "heard": "stereo", "term": "stderr", "named": false, "want": "term"}
 {"text": "Turn up the stereo.", "heard": "stereo", "term": "stderr", "named": false, "want": "heard"}
+{"text": "But as we talked before, it was resolved as it only set cloud as you and never set cloud as the external server or the water vapor.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "But as we talked before, it was resolved as it only set Claude as you and never set cloud as the external server or the water vapor.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "And also, I should mention because I didn't do that to you, in the next session, I will attach handoff files and cloud.md file and more as context so the model works better.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Okay, so Cloudco is amazing, but Sally, our latte app, does not work with the word, and it says cloud as a water vapor in the air.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Okay, so Cloudco is amazing, but Sally, our latte app, does not work with the word, and it says cloud as a water vapor in the air.", "heard": "latte", "term": "Lathe", "named": true, "want": "term"}
+{"text": "Cloud Code.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "I think cloud is better at this than Gemini.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Cloud said the build is fine.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Let cloud handle the refactor.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "I'll ask cloud tomorrow.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Cloud made a mistake in the last commit.", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "Can cloud read the whole repository?", "heard": "cloud", "term": "Claude", "named": true, "want": "term"}
+{"text": "We could run the model in the cloud instead of locally.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "I don't want my dictation going to the cloud.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "The cloud version costs money every month.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Local models are slower than the cloud ones.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "A cloud passed over the sun.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "Sync the settings through a cloud drive.", "heard": "cloud", "term": "Claude", "named": true, "want": "heard"}
+{"text": "I opened the latte app and dictated a note.", "heard": "latte", "term": "Lathe", "named": true, "want": "term"}
+{"text": "I ordered a latte with oat milk.", "heard": "latte", "term": "Lathe", "named": true, "want": "heard"}

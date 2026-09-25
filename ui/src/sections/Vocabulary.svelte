@@ -114,12 +114,39 @@
     onchange();
   }
 
+  // A preset that picked this set picked it by name, and follows it. The name as
+  // typed reaches the config only while it is not empty and not another set's (as
+  // presets compare them, ignoring case): every change saves itself, and a preset
+  // following a half-typed name onto another set would stay there.
+  let draftName = $state(null);
+
+  function renameSet(name) {
+    draftName = name;
+    const taken = config.vocabulary.sets.some(
+      (s, i) => i !== index && s.name.toLowerCase() === name.trim().toLowerCase(),
+    );
+    if (!name.trim() || taken) return;
+    const was = config.vocabulary.sets[index].name;
+    config.vocabulary.sets[index].name = name;
+    for (const p of config.presets) {
+      p.vocabulary_sets = p.vocabulary_sets.map((n) =>
+        n.toLowerCase() === was.toLowerCase() ? name : n,
+      );
+    }
+    onchange();
+  }
+
+  // Every change saves itself, so the two that throw words away ask first.
+  let confirming = $state(null);
+
   function restoreShipped() {
+    confirming = null;
     config.vocabulary.sets[index].terms = $state.snapshot(shippedFor.terms);
     onchange();
   }
 
   function removeSet() {
+    confirming = null;
     config.vocabulary.sets = config.vocabulary.sets.filter((_, i) => i !== index);
     index = Math.max(0, index - 1);
     onchange();
@@ -148,7 +175,7 @@
 
 <div class="preset-tabs">
   {#each config.vocabulary.sets as s, i}
-    <button aria-pressed={index === i} onclick={() => (index = i)}>
+    <button aria-pressed={index === i} onclick={() => { index = i; confirming = null; }}>
       {s.name} <span class="count">{s.terms.length}{#if !s.enabled} &middot; off{/if}</span>
     </button>
   {/each}
@@ -161,9 +188,10 @@
       class="mono set-name"
       type="text"
       aria-label="Set name"
-      value={set.name}
+      value={draftName ?? set.name}
       disabled={!editing}
-      oninput={(e) => { config.vocabulary.sets[index].name = e.currentTarget.value; onchange(); }}
+      oninput={(e) => renameSet(e.currentTarget.value)}
+      onblur={() => (draftName = null)}
     />
     <label class="check" style="margin:0">
       <input
@@ -177,20 +205,44 @@
       {editing ? "Done" : "Edit"}
     </button>
     {#if editing && shippedFor}
-      <button onclick={restoreShipped}>Restore shipped words</button>
+      <button onclick={() => (confirming = "restore")}>Restore shipped words</button>
     {/if}
     {#if editing}
-      <button onclick={removeSet} disabled={config.vocabulary.sets.length <= 1}>
+      <button onclick={() => (confirming = "delete")} disabled={config.vocabulary.sets.length <= 1}>
         Delete this set
       </button>
     {/if}
   </div>
 
+  {#if draftName !== null && draftName !== set.name}
+    <p class="hint" style="margin:-8px 0 12px;color:var(--clay)">
+      {draftName.trim() ? "Another set already has this name" : "A set needs a name"}, so
+      it keeps &ldquo;{set.name}&rdquo;.
+    </p>
+  {/if}
+
+  {#if confirming}
+    <div class="status bad">
+      {#if confirming === "delete"}
+        Delete the &ldquo;{set.name}&rdquo; set and its {set.terms.length} words? This
+        cannot be undone.
+      {:else}
+        Replace the words in &ldquo;{set.name}&rdquo; with the shipped ones? Words you
+        added are dropped, and this cannot be undone.
+      {/if}
+      <div class="row" style="margin-top:8px">
+        <button class="primary" onclick={confirming === "delete" ? removeSet : restoreShipped}>
+          {confirming === "delete" ? "Delete" : "Restore"}
+        </button>
+        <button onclick={() => (confirming = null)}>Cancel</button>
+      </div>
+    </div>
+  {/if}
+
   {#if editing && shippedFor}
     <p class="hint" style="margin:-8px 0 12px">
       Restoring puts back the {shippedFor.terms.length} words this version of the app
-      ships for &ldquo;{shippedFor.name}&rdquo; and drops anything you added. Revert at
-      the bottom undoes it until you save.
+      ships for &ldquo;{shippedFor.name}&rdquo; and drops anything you added.
     </p>
   {/if}
 

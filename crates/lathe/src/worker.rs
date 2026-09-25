@@ -383,6 +383,9 @@ fn dictate(
         }
         Ok(Ok(processed)) => processed,
     };
+    if let Some(why) = engine.take_cloud_warning() {
+        crate::notify_user("Lathe: a cloud model failed", &why);
+    }
 
     match outcome {
         Processed::Rejected(Rejected::NoSpeech) => {
