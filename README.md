@@ -9,8 +9,8 @@
 </p>
 
 Hold a key, talk, release. Punctuated, tidied text lands where your cursor is. Speech
-recognition and cleanup run on your own GPU: nothing leaves the machine, nothing needs
-an account. **[Download the latest release](https://github.com/StanTheGorilla/lathe/releases/latest)**
+recognition and cleanup run on your own GPU: nothing leaves the machine unless you add
+a cloud provider yourself, and nothing needs an account. **[Download the latest release](https://github.com/StanTheGorilla/lathe/releases/latest)**
 for Windows, macOS or Linux, then fetch the models from the Models tab.
 
 ## Why this exists
@@ -38,6 +38,7 @@ makes every dictation slow.
 | **Presets** | Bundles of tone, structure and context. Switch from the tray, or bind a preset to its own hotkey. |
 | **Rewrite, if asked** | Cleanup keeps every word. A preset can instead ask the multilingual model to reshape what you said into a prompt for an AI assistant, structured notes, or fewer words -- off by default, and it must keep every point you made. |
 | **Vocabulary** | Word lists that repair the proper nouns recognisers always get wrong, matched phonetically rather than by a blunt find-and-replace. A misheard word that is also everyday English -- "cloud" for Claude -- is settled by the cleanup model reading the sentence both ways, so "ask cloud" and "the cloud server" each come out right, behind any speech model. Words you fix in History are offered back as vocabulary. |
+| **Cloud models, if you want them** | Off unless you add a provider: OpenRouter, OpenAI, or anything with the same API, including LM Studio and Ollama. Its models join the Speech and Cleanup choices; cleanup falls back to the local model if the cloud fails. API keys live in the system credential store, never in the config file, and go only to the provider's address over https. |
 | **Polish, and 20+ other languages** | Non-English dictation is recognised *and* cleaned, via a second multilingual model. |
 | **History** | The last 200 dictations, searchable, re-pastable, stored in a local SQLite file. |
 | **Audio ducking** | Whatever is playing is silenced while you talk, and restored exactly as it was. |
@@ -89,7 +90,10 @@ also takes ChatML models. Measured on 47 English inputs of the cleanup set (CPU,
 times only compare): Gemma 4 E2B 4.8% WER, S1-mini 6.9% at a quarter of Gemma's time,
 Qwen3.5 4B 7.3% at twice Gemma's, and LFM2.5 1.2B 59.5% -- it answered with the prompt's
 rules -- so LFM2.5 is not offered. Settling "cloud" or "Claude" and the like, over 38
-sentences: Qwen3.5 38, Gemma 37, S1-mini 32, LFM2.5 32, with no wrong swap from any.
+sentences: Qwen3.5 38, Gemma 37, S1-mini 32, LFM2.5 32, with no wrong swap from any. On
+the 58-sentence set that followed, harder and told the speaker's vocabulary, Gemma took
+the term in 16 of the 17 sentences that meant it and left 13 of the 15 everyday uses
+alone; S1-mini 8 and 14.
 
 ```powershell
 # General model against S1-mini on the English set, scored against the expected output.
@@ -139,7 +143,8 @@ to the executable. The reasoning is written out at the top of the script.
 `scripts/build.sh` is the macOS and Linux counterpart. It needs Rust, CMake, Ninja and
 Node.js; Linux additionally needs the Vulkan headers, `glslc`, `glslang-tools` and
 `spirv-headers` (ggml compiles its shaders at build time), plus the WebKitGTK,
-GTK 3, libayatana-appindicator and ALSA development packages that any Tauri app needs.
+GTK 3, libayatana-appindicator and ALSA development packages that any Tauri app needs,
+and `libdbus-1-dev` for the Secret Service, where Lathe keeps cloud API keys.
 `.github/workflows/build.yml` has the exact `apt` and `brew` lines, and can be run by hand
 from the Actions tab for one platform at a time.
 

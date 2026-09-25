@@ -6,6 +6,7 @@ pub mod asr_backend;
 pub mod audio;
 pub mod autostart;
 pub mod cleanup;
+pub mod cloud;
 pub mod config;
 pub mod cues;
 pub mod download;
@@ -14,6 +15,7 @@ pub mod engine;
 pub mod history;
 pub mod hotkey;
 pub mod paste;
+pub mod secrets;
 pub mod update;
 // Moved to its own crate so its tests run without the native stack; re-exported so
 // every `crate::vocabulary` path keeps working.

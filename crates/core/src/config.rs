@@ -36,6 +36,13 @@ pub struct Config {
     pub languages: Languages,
     pub audio: Audio,
     pub models: Models,
+    /// Cloud providers: an OpenAI-compatible address and the models picked from it.
+    /// Their keys are in the system credential store, never here (see `secrets`).
+    pub providers: Vec<Provider>,
+    /// The settings the Providers page replaced. Read so an old config can be moved
+    /// across (`migrate_remote_asr`); written back only if that move failed, so the
+    /// old key is never dropped before the credential store holds it.
+    #[serde(skip_serializing_if = "RemoteAsr::is_unset")]
     pub remote_asr: RemoteAsr,
     pub cues: Cues,
     pub output: Output,
@@ -144,6 +151,60 @@ pub struct Models {
     /// slow sessions: every reload is a fresh allocation, and one made while other
     /// applications hold the card puts the weights in system memory for good.
     pub keep_loaded: bool,
+    /// A cloud model in place of each local one. The local file stays chosen beside
+    /// it: cleanup falls back to it when the cloud fails, and speech may.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whisper_cloud: Option<CloudChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_cloud: Option<CloudChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_multilingual_cloud: Option<CloudChoice>,
+    /// Use the local speech model when the cloud one fails. Off by default, as the
+    /// external endpoint's was: brief section 10 wants a broken setup to fail loudly,
+    /// and speech is the one stage whose fallback changes what was heard.
+    pub speech_cloud_fallback: bool,
+}
+
+/// A cloud provider: anything that speaks the OpenAI API shape -- OpenRouter, OpenAI,
+/// Groq, a local LM Studio or Ollama.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Provider {
+    /// Fixed when the provider is added and never shown. The key is filed under it,
+    /// so renaming a provider keeps its key.
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub models: Vec<CloudModel>,
+    #[serde(default = "provider_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn provider_timeout() -> u64 {
+    120
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CloudModel {
+    /// Exactly as the provider names it, e.g. "google/gemma-3-27b-it".
+    pub name: String,
+    pub kind: CloudKind,
+}
+
+/// Which endpoint a model answers on: speech goes to `/audio/transcriptions`,
+/// cleanup to `/chat/completions`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudKind {
+    Speech,
+    Cleanup,
+}
+
+/// A model slot pointing at the cloud.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudChoice {
+    pub provider: String,
+    pub model: String,
 }
 
 /// Brief 4.3: "External ASR endpoint (advanced)", off by default.
@@ -162,6 +223,13 @@ pub struct RemoteAsr {
     /// error. Off by default: brief section 10 requires failing loudly, and a silent
     /// downgrade to a weaker model would hide a broken configuration indefinitely.
     pub fallback_to_local: bool,
+}
+
+impl RemoteAsr {
+    /// Nothing the user set: no endpoint, no key, not switched on.
+    pub fn is_unset(&self) -> bool {
+        !self.enabled && self.base_url.trim().is_empty() && self.api_key.trim().is_empty()
+    }
 }
 
 impl Default for RemoteAsr {
@@ -287,6 +355,10 @@ impl Default for Models {
                 .unwrap_or(8),
             idle_unload_secs: 15 * 60,
             keep_loaded: true,
+            whisper_cloud: None,
+            cleanup_cloud: None,
+            cleanup_multilingual_cloud: None,
+            speech_cloud_fallback: false,
         }
     }
 }
@@ -336,6 +408,7 @@ impl Default for Config {
             languages: Languages::default(),
             audio: Audio::default(),
             models: Models::default(),
+            providers: Vec::new(),
             remote_asr: RemoteAsr::default(),
             cues: Cues::default(),
             output: Output::default(),
@@ -427,8 +500,105 @@ impl Config {
                 .with_context(|| format!("writing {}", path.display()))?;
             return Ok((default, path, true));
         }
-        let config = Self::load(&path)?;
+        let config = Self::load_migrating(&path)?;
         Ok((config, path, false))
+    }
+
+    /// `load`, then the one-time move of the old external endpoint to Providers. The
+    /// config is written back only when something moved; a move that fails leaves the
+    /// file as it was, key included, and says why in the log.
+    pub fn load_migrating(path: &Path) -> Result<Self> {
+        let mut config = Self::load(path)?;
+        if !config.remote_asr.is_unset() {
+            match config.migrate_remote_asr(&crate::secrets::OsKeyStore) {
+                Ok(()) => {
+                    std::fs::write(path, config.to_toml()?)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!(
+                        "providers: the external endpoint is now a provider, and its key \
+                         is in the system credential store"
+                    );
+                }
+                Err(e) => eprintln!(
+                    "providers: could not move the external endpoint's key to the system \
+                     credential store, so it is left where it was and not used: {e:#}"
+                ),
+            }
+        }
+        Ok(config)
+    }
+
+    /// The old `[remote_asr]` settings as a provider, its key in `store`. The key is
+    /// only removed from the config once the store has given it back intact.
+    pub fn migrate_remote_asr(&mut self, store: &dyn crate::secrets::KeyStore) -> Result<()> {
+        let old = self.remote_asr.clone();
+        let mut id = "endpoint".to_string();
+        let mut n = 2;
+        while self.provider(&id).is_some() {
+            id = format!("endpoint-{n}");
+            n += 1;
+        }
+        let key = old.api_key.trim();
+        if !key.is_empty() {
+            crate::secrets::set_verified(store, &id, key)?;
+        }
+        self.providers.push(Provider {
+            id: id.clone(),
+            name: "External endpoint".into(),
+            base_url: old.base_url.trim().to_string(),
+            models: vec![CloudModel { name: old.model.clone(), kind: CloudKind::Speech }],
+            timeout_secs: old.timeout_secs,
+        });
+        if old.enabled {
+            self.models.whisper_cloud = Some(CloudChoice { provider: id, model: old.model });
+        }
+        self.models.speech_cloud_fallback = old.fallback_to_local;
+        self.remote_asr = RemoteAsr { enabled: false, base_url: String::new(), api_key: String::new(), ..RemoteAsr::default() };
+        Ok(())
+    }
+
+    pub fn provider(&self, id: &str) -> Option<&Provider> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    fn resolve(&self, choice: &CloudChoice, what: &str) -> Result<(&Provider, String)> {
+        let provider = self.provider(&choice.provider).with_context(|| {
+            format!("{what} is set to a model at a provider that is no longer in Providers")
+        })?;
+        Ok((provider, choice.model.clone()))
+    }
+
+    /// The cloud model recognising speech, if one is picked.
+    pub fn cloud_speech(&self) -> Result<Option<(&Provider, String)>> {
+        self.models
+            .whisper_cloud
+            .as_ref()
+            .map(|c| self.resolve(c, "Speech"))
+            .transpose()
+    }
+
+    /// The cloud model cleaning this dictation, if one is picked for its slot. English
+    /// without a rewrite is the English slot; every other language, and every rewrite,
+    /// is the other one, the same split the local models follow.
+    pub fn cloud_cleanup(&self, preset: &Preset) -> Result<Option<(&Provider, String)>> {
+        let choice = if self.cloud_cleanup_is_english(preset) {
+            &self.models.cleanup_cloud
+        } else {
+            &self.models.cleanup_multilingual_cloud
+        };
+        choice.as_ref().map(|c| self.resolve(c, "Cleanup")).transpose()
+    }
+
+    fn cloud_cleanup_is_english(&self, preset: &Preset) -> bool {
+        self.languages.current().eq_ignore_ascii_case("en") && preset.rewrite == Rewrite::Off
+    }
+
+    /// Whether a cloud model cleans this dictation outside the English slot. Then no
+    /// local instruction model is loaded for it: one is loaded only if the cloud fails.
+    pub fn cloud_replaces_instruction_model(&self, preset: &Preset) -> bool {
+        preset.cleanup
+            && !self.cloud_cleanup_is_english(preset)
+            && self.models.cleanup_multilingual_cloud.is_some()
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -527,7 +697,7 @@ pub fn watch(path: PathBuf) -> std::sync::mpsc::Receiver<Result<Config, String>>
             }
             // Editors write in several steps; let the file settle before reading.
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let result = Config::load(&path).map_err(|e| format!("{e:#}"));
+            let result = Config::load_migrating(&path).map_err(|e| format!("{e:#}"));
             if out_tx.send(result).is_err() {
                 return;
             }
@@ -543,7 +713,112 @@ pub fn history_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::Languages;
+    use super::*;
+    use crate::secrets::{tests::MemoryStore, KeyStore};
+
+    fn old_endpoint(key: &str) -> Config {
+        let mut c = Config::default();
+        c.remote_asr = RemoteAsr {
+            enabled: true,
+            base_url: "https://api.example.com/v1".into(),
+            model: "whisper-large".into(),
+            api_key: key.into(),
+            timeout_secs: 90,
+            fallback_to_local: true,
+        };
+        c
+    }
+
+    #[test]
+    fn the_old_endpoint_becomes_a_provider_and_its_key_leaves_the_file() {
+        let store = MemoryStore::default();
+        let mut c = old_endpoint("sk-0123456789abcdef");
+        c.migrate_remote_asr(&store).unwrap();
+
+        assert_eq!(store.get("endpoint").unwrap().as_deref(), Some("sk-0123456789abcdef"));
+        let toml = c.to_toml().unwrap();
+        assert!(!toml.contains("sk-0123456789abcdef"), "{toml}");
+        assert!(!toml.contains("remote_asr"));
+
+        let p = c.provider("endpoint").unwrap();
+        assert_eq!(p.base_url, "https://api.example.com/v1");
+        assert_eq!(p.timeout_secs, 90);
+        assert_eq!(p.models, vec![CloudModel { name: "whisper-large".into(), kind: CloudKind::Speech }]);
+        assert_eq!(
+            c.models.whisper_cloud,
+            Some(CloudChoice { provider: "endpoint".into(), model: "whisper-large".into() })
+        );
+        assert!(c.models.speech_cloud_fallback);
+
+        // And it survives the round trip through the file.
+        let back: Config = toml::from_str(&toml).unwrap();
+        assert!(back.remote_asr.is_unset());
+        assert_eq!(back.providers, c.providers);
+        assert_eq!(back.models.whisper_cloud, c.models.whisper_cloud);
+    }
+
+    #[test]
+    fn a_failed_move_keeps_the_key_in_the_file() {
+        for store in [
+            MemoryStore { broken: true, ..Default::default() },
+            MemoryStore { forgetful: true, ..Default::default() },
+        ] {
+            let mut c = old_endpoint("sk-0123456789abcdef");
+            assert!(c.migrate_remote_asr(&store).is_err());
+            assert!(c.providers.is_empty());
+            // Written back as it was: nothing lost.
+            assert!(c.to_toml().unwrap().contains("sk-0123456789abcdef"));
+        }
+    }
+
+    #[test]
+    fn an_endpoint_without_a_key_moves_without_the_store() {
+        let store = MemoryStore { broken: true, ..Default::default() };
+        let mut c = old_endpoint("");
+        c.remote_asr.enabled = false;
+        c.migrate_remote_asr(&store).unwrap();
+        assert_eq!(c.providers.len(), 1);
+        assert_eq!(c.models.whisper_cloud, None);
+    }
+
+    #[test]
+    fn an_untouched_config_has_nothing_to_move_and_nothing_cloud() {
+        let c = Config::default();
+        assert!(c.remote_asr.is_unset());
+        let toml = c.to_toml().unwrap();
+        assert!(!toml.contains("remote_asr"));
+        assert!(!toml.contains("_cloud ="));
+        assert!(c.cloud_speech().unwrap().is_none());
+        assert!(c.cloud_cleanup(c.active()).unwrap().is_none());
+    }
+
+    #[test]
+    fn rewrites_and_other_languages_use_the_other_cleanup_slot() {
+        let mut c = Config::default();
+        c.providers.push(Provider {
+            id: "or".into(),
+            name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            models: vec![],
+            timeout_secs: 120,
+        });
+        c.models.cleanup_cloud = Some(CloudChoice { provider: "or".into(), model: "en-model".into() });
+        c.models.cleanup_multilingual_cloud =
+            Some(CloudChoice { provider: "or".into(), model: "other-model".into() });
+        let mut preset = c.active().clone();
+        assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "en-model");
+        assert!(!c.cloud_replaces_instruction_model(&preset));
+        preset.rewrite = Rewrite::Prompt;
+        assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "other-model");
+        assert!(c.cloud_replaces_instruction_model(&preset));
+        preset.rewrite = Rewrite::Off;
+        c.languages.secondary = "pl".into();
+        c.languages.active = "pl".into();
+        assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "other-model");
+        // A provider that was removed is an error, not a silent switch to local.
+        c.providers.clear();
+        assert!(c.cloud_cleanup(&preset).is_err());
+    }
 
     #[test]
     fn the_tray_offers_the_language_not_in_use() {

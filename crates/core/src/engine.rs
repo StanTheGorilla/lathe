@@ -56,6 +56,9 @@ pub struct Engine {
     /// The warning from the last load whose weights did not fit the card, until
     /// someone takes it to show the user. The log line alone was found to be invisible.
     spill_warning: Option<String>,
+    /// Why the last dictation's cloud cleanup fell back to the local model, until
+    /// someone takes it to show the user. Key already blanked out.
+    cloud_warning: Option<String>,
     last_used: Instant,
 }
 
@@ -72,6 +75,7 @@ impl Engine {
             cleanup_multilingual_missing: None,
             gpu: None,
             spill_warning: None,
+            cloud_warning: None,
             last_used: Instant::now(),
         })
     }
@@ -79,6 +83,10 @@ impl Engine {
     /// The last load's "will not fit" warning, once. `None` when it fitted.
     pub fn take_spill_warning(&mut self) -> Option<String> {
         self.spill_warning.take()
+    }
+
+    pub fn take_cloud_warning(&mut self) -> Option<String> {
+        self.cloud_warning.take()
     }
 
     /// The device index and layer count to load a cleanup model with.
@@ -129,6 +137,10 @@ impl Engine {
     pub fn loaded(&self, config: &Config, preset: &Preset) -> bool {
         if self.asr.is_none() {
             return false;
+        }
+        // The cloud cleans this one; the local model is loaded only if it fails.
+        if config.cloud_replaces_instruction_model(preset) {
+            return true;
         }
         let instruct = (self.cleanup_multilingual.is_some() && self.instruct_is(config))
             || self.cleanup_multilingual_missing.as_deref() == Some(config.instruction_model_path().as_path());
@@ -204,7 +216,8 @@ impl Engine {
             self.cleanup = Some(cleanup);
         }
 
-        if (!english || judge) && self.cleanup_multilingual.is_none() {
+        let cloud = config.cloud_replaces_instruction_model(preset);
+        if (!english || judge) && !cloud && self.cleanup_multilingual.is_none() {
             let path = config.instruction_model_path();
             if path.exists() {
                 progress("Loading multilingual cleanup model");
@@ -260,6 +273,27 @@ impl Engine {
         progress("Compiling shaders");
         self.warmup(config, english, judge)?;
         self.last_used = Instant::now();
+        Ok(())
+    }
+
+    /// The instruction model for this language, now, for a dictation the cloud was to
+    /// clean and did not. No warmup: this is the fallback path, already late.
+    fn load_instruction_model(&mut self, config: &Config) -> Result<()> {
+        let path = config.instruction_model_path();
+        if self.cleanup_multilingual.is_some() && self.instruct_is(config) {
+            return Ok(());
+        }
+        if !path.exists() {
+            anyhow::bail!("{} is not downloaded", path.display());
+        }
+        let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
+        let backend = Self::backend_mut(&mut self.backend)?;
+        let (cleanup, ms) =
+            Cleanup::load(backend, &path, device, layers, crate::cleanup::Flavour::Instruct)?;
+        eprintln!("instruction model loaded in {ms}ms, after the cloud failed");
+        self.cleanup_multilingual = Some(cleanup);
+        self.cleanup_multilingual_path = Some(path);
+        self.cleanup_multilingual_missing = None;
         Ok(())
     }
 
@@ -383,11 +417,17 @@ impl Engine {
 
         // Brief 4.3: the external endpoint, when configured, replaces local recognition.
         // The VAD gate above still runs locally, so silence is never uploaded.
-        let (text, asr_ms) = if config.remote_asr.enabled {
+        if config.remote_asr.enabled {
+            anyhow::bail!(
+                "the external endpoint's API key could not be moved to the system credential \
+                 store, so the endpoint is not used. The log says why."
+            );
+        }
+        let (text, asr_ms) = if let Some((provider, model)) = config.cloud_speech()? {
             let started = Instant::now();
-            match remote_transcribe(config, &gated.pcm, lang, &vocabulary.terms(64)) {
+            match cloud_transcribe(provider, &model, &gated.pcm, lang, &vocabulary.terms(64)) {
                 Ok(text) => (text, started.elapsed().as_millis()),
-                Err(e) if config.remote_asr.fallback_to_local => {
+                Err(e) if config.models.speech_cloud_fallback => {
                     eprintln!("remote transcription failed, falling back to local: {e:#}");
                     let t = asr.transcribe(&gated.pcm, lang)?;
                     (t.text, t.infer_ms)
@@ -471,7 +511,43 @@ impl Engine {
         // still is; amendment A21 adds a second, multilingual model for everything else,
         // so a non-English preset is cleaned rather than passed through raw. Amendment
         // A33 sends a rewrite preset through that same model in any language.
-        let (cleaned, cleanup_ms) = if preset.cleanup {
+        // A cloud model first, when one is picked for this dictation's slot. Whatever
+        // goes wrong there, the local model cleans it instead and the user is told.
+        let cloud = if preset.cleanup {
+            let terms = vocabulary.terms(64);
+            match config.cloud_cleanup(preset) {
+                Ok(Some((provider, model))) => {
+                    let started = Instant::now();
+                    match cloud_clean(provider, &model, preset, &transcript.text, lang, &terms) {
+                        Ok(text) => Some((text, started.elapsed().as_millis())),
+                        Err(e) => {
+                            eprintln!("cloud cleanup with '{model}' failed, cleaning locally: {e:#}");
+                            self.cloud_warning = Some(format!("{e:#}"));
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("{e:#}; cleaning locally");
+                    self.cloud_warning = Some(format!("{e:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if cloud.is_none() && config.cloud_replaces_instruction_model(preset) {
+            // Not loaded up front because the cloud was to do it. Slow once; a missing
+            // file leaves the transcript uncleaned, as it would without the cloud.
+            if let Err(e) = self.load_instruction_model(config) {
+                eprintln!("could not load the local instruction model: {e:#}");
+            }
+        }
+
+        let (cleaned, cleanup_ms) = if let Some(done) = cloud {
+            done
+        } else if preset.cleanup {
             let instruct = Self::wants_instruct(config, preset);
             let model = if instruct {
                 // Absent, and in English, S1-mini was loaded in its place.
@@ -546,27 +622,55 @@ impl Engine {
 }
 
 
-/// Brief 4.3. Builds the backend per call rather than holding it: it owns no model and
-/// no connection, so there is nothing to keep warm, and reading the config each time
-/// means an endpoint change takes effect on the next dictation like every other setting.
-fn remote_transcribe(config: &Config, pcm: &[f32], lang: &str, hints: &[String]) -> Result<String> {
+/// Brief 4.3, through a provider. Builds the backend per call rather than holding it:
+/// it owns no model and no connection, so there is nothing to keep warm, and reading
+/// the config each time means a change takes effect on the next dictation like every
+/// other setting. The key is read from the credential store at the same moment.
+pub fn cloud_transcribe(
+    provider: &crate::config::Provider,
+    model: &str,
+    pcm: &[f32],
+    lang: &str,
+    hints: &[String],
+) -> Result<String> {
     use crate::asr_backend::{AsrBackend, OpenAiCompatBackend};
+    use crate::secrets::KeyStore;
 
-    let remote = &config.remote_asr;
-    if remote.base_url.trim().is_empty() {
-        anyhow::bail!("the external transcription endpoint is enabled but has no URL");
+    if provider.base_url.trim().is_empty() {
+        anyhow::bail!("the provider '{}' has no address", provider.name);
     }
-
-    let backend = OpenAiCompatBackend::new(
-        &remote.base_url,
-        &remote.model,
-        Some(remote.api_key.clone()),
-        remote.timeout_secs,
-    );
+    let key = crate::secrets::OsKeyStore.get(&provider.id)?;
+    let backend = OpenAiCompatBackend::new(&provider.base_url, model, key, provider.timeout_secs);
     // The vocabulary goes out as the request's `prompt`, which is the only way to bias
     // a remote recogniser. Capped like the local list: a Whisper-style prompt keeps
     // only its last 224 tokens.
     backend.transcribe(pcm, lang, hints)
+}
+
+/// Cleanup through a cloud model, with the prompt the local instruction model gets.
+pub fn cloud_clean(
+    provider: &crate::config::Provider,
+    model: &str,
+    preset: &Preset,
+    text: &str,
+    lang: &str,
+    terms: &[String],
+) -> Result<String> {
+    use crate::cleanup::{build_instruct_prompt_for, build_rewrite_prompt_for, Rewrite, Turns};
+    use crate::secrets::KeyStore;
+
+    let key = crate::secrets::OsKeyStore.get(&provider.id)?;
+    let client = crate::cloud::ChatClient::new(provider, model, key)?;
+    let language = language_name(lang);
+    let prompt = if preset.rewrite != Rewrite::Off {
+        build_rewrite_prompt_for(Turns::Plain, text, language, preset.rewrite, preset.styling, terms)
+    } else {
+        build_instruct_prompt_for(
+            Turns::Plain, text, language, preset.styling, preset.structure, preset.context, terms,
+        )
+    };
+    // The local instruction model's budget: lists and email layout run longer.
+    client.complete(&prompt, crate::cloud::max_tokens_for(text, 2.0))
 }
 
 /// The English name of a language code, for the instruction prompt.

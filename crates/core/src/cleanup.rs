@@ -147,6 +147,8 @@ pub enum Turns {
     /// ChatML with the thinking block closed before the reply, as S1-mini's own prompt
     /// does: Qwen3 and Qwen3.5, which would otherwise spend the budget reasoning.
     ChatMlNoThink,
+    /// No markup: a cloud provider applies its model's own template to the message.
+    Plain,
 }
 
 impl Turns {
@@ -168,6 +170,7 @@ impl Turns {
             Turns::ChatMlNoThink => format!(
                 "<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
             ),
+            Turns::Plain => body.to_string(),
         }
     }
 }

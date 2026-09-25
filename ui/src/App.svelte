@@ -7,6 +7,7 @@
   import Hotkeys from "./sections/Hotkeys.svelte";
   import Audio from "./sections/Audio.svelte";
   import Models from "./sections/Models.svelte";
+  import Providers from "./sections/Providers.svelte";
   import History from "./sections/History.svelte";
   import About from "./sections/About.svelte";
 
@@ -15,7 +16,7 @@
   // searchable history, 6.7 for statistics, and 4.2 for a credits screen. See A17.
   //
   // The rail icons are Lucide's sliders-horizontal, book-a, keyboard, audio-lines, cpu,
-  // history and info, inlined below (https://lucide.dev).
+  // cloud, history and info, inlined below (https://lucide.dev).
   //
   //   ISC License. Copyright (c) 2026 Lucide Icons and Contributors.
   //   Permission to use, copy, modify, and/or distribute this software for any purpose
@@ -48,6 +49,7 @@
     { id: "hotkeys", label: "Hotkeys", component: Hotkeys },
     { id: "audio", label: "Audio", component: Audio },
     { id: "models", label: "Models", component: Models },
+    { id: "providers", label: "Providers", component: Providers },
     { id: "history", label: "History", component: History },
     { id: "about", label: "About", component: About },
   ];
@@ -147,6 +149,8 @@
             <rect x="4" y="4" width="16" height="16" rx="2" />
             <rect x="8" y="8" width="8" height="8" rx="1" />
             <path d="M12 20v2M12 2v2M17 20v2M17 2v2M2 12h2M2 17h2M2 7h2M20 12h2M20 17h2M20 7h2M7 20v2M7 2v2" />
+          {:else if section.id === "providers"}
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
           {:else if section.id === "history"}
             <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2" />
           {:else}

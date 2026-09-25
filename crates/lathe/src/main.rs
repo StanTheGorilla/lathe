@@ -340,6 +340,11 @@ fn run(args: &[String]) -> Result<()> {
             commands::install_update,
             commands::setup_status,
             commands::take_section,
+            commands::provider_key_status,
+            commands::set_provider_key,
+            commands::reveal_provider_key,
+            commands::delete_provider_key,
+            commands::test_cloud_model,
         ])
         .setup(move |app| {
             build_tray(app.handle(), &config.lock().unwrap(), &bindings)?;
