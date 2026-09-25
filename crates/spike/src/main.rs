@@ -179,6 +179,12 @@ enum Command {
         /// the English cleanup model.
         #[arg(long)]
         instruct: bool,
+        /// Score without telling the model the vocabulary, as 0.1.15 did.
+        #[arg(long)]
+        no_terms: bool,
+        /// Tell the model only the term in question, not the whole vocabulary.
+        #[arg(long)]
+        only_asked: bool,
     },
     /// Duck other applications for a few seconds, then restore. Verifies the ducking
     /// path without needing a dictation.
@@ -465,13 +471,13 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Command::ContextEval { set, instruct } => {
+        Command::ContextEval { set, instruct, no_terms, only_asked } => {
             let (model, flavour) = if instruct {
                 (&cli.multilingual_model, cleanup::Flavour::Instruct)
             } else {
                 (&cli.cleanup_model, cleanup::Flavour::S1Mini)
             };
-            context_eval(&cli.models.join(model), flavour, cli.gpu, &set)?;
+            context_eval(&cli.models.join(model), flavour, cli.gpu, &set, !no_terms, only_asked)?;
         }
 
         Command::Duck { secs, level } => {
@@ -688,8 +694,13 @@ fn context_eval(
     flavour: cleanup::Flavour,
     gpu: i32,
     set: &Path,
+    with_terms: bool,
+    only_asked: bool,
 ) -> Result<()> {
     use lathe_core::vocabulary::{Set, Term, Vocabulary};
+
+    // What a dictation tells the judge: the shipped vocabulary, as the engine passes it.
+    let shipped = Vocabulary::default().terms(64);
 
     let items: Vec<ContextItem> = read_jsonl(set)?;
     let backend = LlamaBackend::init()?;
@@ -713,14 +724,31 @@ fn context_eval(
             }],
             ..Vocabulary::default()
         };
+        let terms = if with_terms && only_asked {
+            vec![item.term.clone()]
+        } else if with_terms {
+            let mut t = shipped.clone();
+            if !t.contains(&item.term) {
+                t.push(item.term.clone());
+            }
+            t
+        } else {
+            Vec::new()
+        };
         let mut asked = false;
         let mut failure = None;
         vocabulary.correct_in_context(&item.text, &mut |choice| {
-            if !choice.heard.eq_ignore_ascii_case(&item.heard) {
+            // Only the first such word is the one the line is about.
+            if asked || !choice.heard.eq_ignore_ascii_case(&item.heard) {
                 return None;
             }
             asked = true;
-            match model.log_likelihoods(&backend, &[&choice.as_heard, &choice.as_term], threads()) {
+            match model.log_likelihoods(
+                &backend,
+                &[&choice.as_heard, &choice.as_term],
+                &terms,
+                threads(),
+            ) {
                 Ok(s) => scores.push(ContextScore {
                     text: item.text.clone(),
                     heard: item.heard.clone(),
@@ -787,6 +815,25 @@ fn context_eval(
             right(Some(false)),
             right(None),
             if margin == default_margin { "  <- current default" } else { "" }
+        );
+    }
+    // Named forms on their own, against a threshold of their own: below zero leans
+    // toward the term the user named.
+    println!("\n{:>9}  {:>11}  {:>13}  {:>13}", "named at", "named", "wanted term", "wanted heard");
+    for threshold in [-6.0f32, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0] {
+        let named: Vec<_> = scores.iter().filter(|s| s.named).collect();
+        let count = |want: Option<bool>| {
+            let pool: Vec<_> = named.iter().filter(|s| want.is_none_or(|w| s.want_term == w)).collect();
+            let ok = pool.iter().filter(|s| (s.delta > threshold) == s.want_term).count();
+            format!("{ok}/{}", pool.len())
+        };
+        println!(
+            "{:>9.1}  {:>11}  {:>13}  {:>13}{}",
+            threshold,
+            count(None),
+            count(Some(true)),
+            count(Some(false)),
+            if threshold == 0.0 { "  <- current" } else { "" }
         );
     }
     println!("\n{per_question:.0} ms per question, both readings together");

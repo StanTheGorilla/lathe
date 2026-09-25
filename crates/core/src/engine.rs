@@ -336,7 +336,7 @@ impl Engine {
         if let (true, Some(model), Some(backend)) =
             (judge, &self.cleanup_multilingual, &self.backend)
         {
-            let _ = model.log_likelihoods(backend, &["warm up", "warmed up"], config.models.threads);
+            let _ = model.log_likelihoods(backend, &["warm up", "warmed up"], &[], config.models.threads);
         }
         eprintln!("warmup took {}ms", started.elapsed().as_millis());
         Ok(())
@@ -419,10 +419,18 @@ impl Engine {
             (Some(model), Some(backend)) if vocabulary.context => {
                 let margin = vocabulary.context_margin;
                 let threads = config.models.threads;
+                let known = vocabulary.terms(64);
                 vocabulary.correct_in_context(&text, &mut |choice| {
+                    // The term in question is always among those the judge is told of,
+                    // even past the cap.
+                    let mut terms = known.clone();
+                    if !terms.iter().any(|t| t.eq_ignore_ascii_case(&choice.term)) {
+                        terms.push(choice.term.clone());
+                    }
                     match model.log_likelihoods(
                         backend,
                         &[&choice.as_heard, &choice.as_term],
+                        &terms,
                         threads,
                     ) {
                         Ok(scores) => {
