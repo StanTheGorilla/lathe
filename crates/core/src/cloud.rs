@@ -181,6 +181,18 @@ impl ChatClient {
         })
     }
 
+    /// `request_body`, plus OpenRouter's reasoning control: a model that thinks before
+    /// it answers is asked to think briefly and not to send the thinking back. For
+    /// dictation that is seconds saved, and the thinking is not the answer anyway.
+    /// OpenRouter ignores it for models that do not reason.
+    fn request_body(&self, prompt: &str, max_tokens: u32) -> serde_json::Value {
+        let mut body = request_body(&self.model, prompt, max_tokens);
+        if self.url.contains("openrouter.ai") {
+            body["reasoning"] = serde_json::json!({ "effort": "low", "exclude": true });
+        }
+        body
+    }
+
     fn call(&self) -> Call<'_> {
         Call { api: self.api, key: self.key.as_deref(), timeout: self.timeout }
     }
@@ -192,7 +204,7 @@ impl ChatClient {
         match self.api {
             Api::OpenAi => {
                 let (mut status, mut text) =
-                    call.send(&self.url, Some(&request_body(&self.model, prompt, max_tokens)))?;
+                    call.send(&self.url, Some(&self.request_body(prompt, max_tokens)))?;
                 // OpenAI's reasoning models refuse `temperature` and `max_tokens` outright.
                 // Asked again with neither, they answer; anything else that was wrong
                 // with the request is still wrong and says so the second time.
@@ -255,10 +267,20 @@ pub fn parse_reply(text: &str) -> Result<String> {
     if let Some(message) = v.pointer("/error/message").and_then(|m| m.as_str()) {
         bail!("the provider answered with an error: {message}");
     }
-    let content = v
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow!("the provider's reply has no text in it"))?;
+    let content = v.pointer("/choices/0/message/content").and_then(|c| c.as_str());
+    let finish = v.pointer("/choices/0/finish_reason").and_then(|f| f.as_str());
+    let content = match (content, finish) {
+        // A reasoning model that spent the whole budget thinking has nothing to say.
+        (None | Some(""), Some("length")) => bail!(
+            "the model used its whole answer budget thinking and wrote no text; \
+             a model that does not reason, or reasons less, avoids this"
+        ),
+        (Some(c), _) => c,
+        (None, finish) => bail!(
+            "the provider's reply has no text in it (finish reason: {})",
+            finish.unwrap_or("none given")
+        ),
+    };
     let content = match content.find("</think>") {
         Some(end) if content.trim_start().starts_with("<think>") => &content[end + 8..],
         _ => content,
@@ -291,9 +313,13 @@ pub fn parse_anthropic_reply(text: &str) -> Result<String> {
 
 /// Room for the answer: generous, because a cloud model is billed for what it writes,
 /// not for the limit, and a limit hit halfway loses the end of the dictation.
+///
+/// At least 8192 whatever the dictation's length: a reasoning model spends tokens
+/// thinking before it writes a word, and with a budget sized to the text alone it
+/// ran out before answering (dots-3-note on OpenRouter, a 21 s dictation).
 pub fn max_tokens_for(raw: &str, factor: f32) -> u32 {
     let estimate = raw.chars().count() as f32 / 3.0 * factor;
-    (estimate as u32 + 256).min(8192)
+    (estimate as u32 + 256).clamp(8192, 32768)
 }
 
 /// A model a provider offers, as the settings window lists it.
@@ -571,6 +597,29 @@ mod tests {
         p.name = String::new();
         let e = ChatClient::new(&p, "m", None).err().unwrap();
         assert_eq!(format!("{e:#}"), "the unnamed provider has no address. Add one on the Providers page.");
+    }
+
+    #[test]
+    fn a_budget_spent_on_thinking_is_named_as_such() {
+        // What OpenRouter returned for dots-3-note with a budget sized to the text.
+        let spent = r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"length"}]}"#;
+        let e = format!("{:#}", parse_reply(spent).unwrap_err());
+        assert!(e.contains("thinking"), "{e}");
+        let empty = r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
+        assert!(parse_reply(empty).is_err());
+        let odd = r#"{"choices":[{"message":{"content":null},"finish_reason":"content_filter"}]}"#;
+        assert!(format!("{:#}", parse_reply(odd).unwrap_err()).contains("content_filter"));
+        // A short dictation still leaves a reasoning model room to think.
+        assert_eq!(max_tokens_for("so um this is a test", 2.0), 8192);
+        assert!(max_tokens_for(&"word ".repeat(20_000), 2.0) <= 32768);
+    }
+
+    #[test]
+    fn openrouter_is_asked_to_think_briefly() {
+        let or = ChatClient::new(&provider("https://openrouter.ai/api/v1"), "m", None).unwrap();
+        assert_eq!(or.request_body("x", 8192)["reasoning"]["effort"], "low");
+        let other = ChatClient::new(&provider("https://api.deepseek.com"), "m", None).unwrap();
+        assert!(other.request_body("x", 8192).get("reasoning").is_none());
     }
 
     #[test]
