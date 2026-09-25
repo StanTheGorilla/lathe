@@ -1,5 +1,6 @@
 <script>
   import { onMount } from "svelte";
+  import { displayName, incomplete } from "../providers.js";
   import {
     listDevices,
     modelStatus,
@@ -276,8 +277,10 @@
         .filter((m) => m.kind === kind && m.name.trim())
         .map((m) => ({
           cloud: { provider: p.id, model: m.name },
-          label: m.name,
-          note: `${p.name || "Provider"}, in the cloud. Your text leaves this computer.`,
+          label: m.label || m.name,
+          note: incomplete(p)
+            ? `${displayName(p)} is not finished: it needs a name and an address on the Providers page.`
+            : `${displayName(p)}${m.label ? ` (${m.name})` : ""}, in the cloud. What you say leaves this computer.`,
           size: "",
         })),
     );

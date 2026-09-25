@@ -345,6 +345,7 @@ fn run(args: &[String]) -> Result<()> {
             commands::reveal_provider_key,
             commands::delete_provider_key,
             commands::test_cloud_model,
+            commands::list_provider_models,
         ])
         .setup(move |app| {
             build_tray(app.handle(), &config.lock().unwrap(), &bindings)?;

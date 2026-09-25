@@ -172,6 +172,9 @@ enum Command {
         /// The model to ask at --cloud-url, as the provider names it.
         #[arg(long)]
         cloud_model: Option<String>,
+        /// The request shape --cloud-url speaks: "openai" or "anthropic".
+        #[arg(long, default_value = "openai")]
+        cloud_api: String,
     },
     /// Put the vocabulary's context questions to a cleanup model and score its answers.
     ///
@@ -467,10 +470,11 @@ fn main() -> Result<()> {
             instruct,
             cloud_url,
             cloud_model,
+            cloud_api,
         } => {
             let cloud = cloud_url.zip(cloud_model);
             cleanup_eval(
-                cloud.as_ref().map(|(u, m)| (u.as_str(), m.as_str())),
+                cloud.as_ref().map(|(u, m)| (u.as_str(), m.as_str(), cloud_api.as_str())),
                 &cli.models,
                 &cli.cleanup_model,
                 cli.gpu,
@@ -891,7 +895,7 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
 }
 
 fn cleanup_eval(
-    cloud: Option<(&str, &str)>,
+    cloud: Option<(&str, &str, &str)>,
     models: &Path,
     cleanup_model: &str,
     gpu: i32,
@@ -904,7 +908,7 @@ fn cleanup_eval(
 ) -> Result<()> {
     let items: Vec<EvalItem> = read_jsonl(set)?;
     let outputs = match cloud {
-        Some((url, model)) => cloud_cleanup_outputs(url, model, items, lang)?,
+        Some((url, model, api)) => cloud_cleanup_outputs(url, model, api, items, lang)?,
         None => local_cleanup_outputs(models, cleanup_model, gpu, items, lang, instruct)?,
     };
 
@@ -914,7 +918,7 @@ fn cleanup_eval(
         lines.push('\n');
     }
     std::fs::write(out, lines)?;
-    let label = cloud.map_or(cleanup_model, |(_, m)| m);
+    let label = cloud.map_or(cleanup_model, |(_, m, _)| m);
     score_cleanup(label, &outputs, reference, against_clean)
 }
 
@@ -922,16 +926,22 @@ fn cleanup_eval(
 fn cloud_cleanup_outputs(
     url: &str,
     model: &str,
+    api: &str,
     items: Vec<EvalItem>,
     lang: &str,
 ) -> Result<Vec<EvalOutput>> {
     use lathe_core::cleanup::{build_instruct_prompt_for, Turns};
-    use lathe_core::config::Provider;
+    use lathe_core::config::{Api, Provider};
 
     let provider = Provider {
         id: "eval".into(),
         name: "eval".into(),
         base_url: url.into(),
+        api: match api {
+            "openai" => Api::OpenAi,
+            "anthropic" => Api::Anthropic,
+            other => anyhow::bail!("--cloud-api is openai or anthropic, not '{other}'"),
+        },
         models: vec![],
         timeout_secs: 120,
     };

@@ -42,3 +42,4 @@ export const revealProviderKey = (id) => invoke("reveal_provider_key", { id });
 export const deleteProviderKey = (id) => invoke("delete_provider_key", { id });
 export const testCloudModel = (provider, model, kind) =>
   invoke("test_cloud_model", { provider, model, kind });
+export const listProviderModels = (provider) => invoke("list_provider_models", { provider });

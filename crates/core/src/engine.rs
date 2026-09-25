@@ -637,7 +637,13 @@ pub fn cloud_transcribe(
     use crate::secrets::KeyStore;
 
     if provider.base_url.trim().is_empty() {
-        anyhow::bail!("the provider '{}' has no address", provider.name);
+        anyhow::bail!(
+            "{} has no address. Add one on the Providers page.",
+            provider.display_name()
+        );
+    }
+    if provider.api == crate::config::Api::Anthropic {
+        anyhow::bail!("{} has no speech models; pick one from another provider", provider.display_name());
     }
     let key = crate::secrets::OsKeyStore.get(&provider.id)?;
     let backend = OpenAiCompatBackend::new(&provider.base_url, model, key, provider.timeout_secs);

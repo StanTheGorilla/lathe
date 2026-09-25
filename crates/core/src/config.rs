@@ -166,7 +166,7 @@ pub struct Models {
 }
 
 /// A cloud provider: anything that speaks the OpenAI API shape -- OpenRouter, OpenAI,
-/// Groq, a local LM Studio or Ollama.
+/// DeepSeek, Groq, a local LM Studio or Ollama -- or Anthropic's own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Provider {
     /// Fixed when the provider is added and never shown. The key is filed under it,
@@ -174,10 +174,49 @@ pub struct Provider {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    /// Which request shape the address speaks. Absent in configs written before
+    /// Anthropic was offered, all of which were OpenAI-compatible.
+    #[serde(default)]
+    pub api: Api,
     #[serde(default)]
     pub models: Vec<CloudModel>,
     #[serde(default = "provider_timeout")]
     pub timeout_secs: u64,
+}
+
+impl Provider {
+    /// The name to show and log. A provider saved before it was given one still has
+    /// to be told apart from the others, so its address stands in.
+    pub fn display_name(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        let host = self
+            .base_url
+            .trim()
+            .split("://")
+            .last()
+            .unwrap_or("")
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("");
+        if host.is_empty() {
+            "the unnamed provider".to_string()
+        } else {
+            host.to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Api {
+    /// `/chat/completions` with a Bearer key: nearly every provider.
+    #[default]
+    OpenAi,
+    /// `/v1/messages` with an `x-api-key` header.
+    Anthropic,
 }
 
 fn provider_timeout() -> u64 {
@@ -189,6 +228,10 @@ pub struct CloudModel {
     /// Exactly as the provider names it, e.g. "google/gemma-3-27b-it".
     pub name: String,
     pub kind: CloudKind,
+    /// The provider's own name for it, when its model list gave one ("Google: Gemma 3
+    /// 27B"). Only for showing; requests go by `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Which endpoint a model answers on: speech goes to `/audio/transcriptions`,
@@ -546,7 +589,8 @@ impl Config {
             id: id.clone(),
             name: "External endpoint".into(),
             base_url: old.base_url.trim().to_string(),
-            models: vec![CloudModel { name: old.model.clone(), kind: CloudKind::Speech }],
+            api: Api::OpenAi,
+            models: vec![CloudModel { name: old.model.clone(), kind: CloudKind::Speech, label: None }],
             timeout_secs: old.timeout_secs,
         });
         if old.enabled {
@@ -743,7 +787,7 @@ mod tests {
         let p = c.provider("endpoint").unwrap();
         assert_eq!(p.base_url, "https://api.example.com/v1");
         assert_eq!(p.timeout_secs, 90);
-        assert_eq!(p.models, vec![CloudModel { name: "whisper-large".into(), kind: CloudKind::Speech }]);
+        assert_eq!(p.models, vec![CloudModel { name: "whisper-large".into(), kind: CloudKind::Speech, label: None }]);
         assert_eq!(
             c.models.whisper_cloud,
             Some(CloudChoice { provider: "endpoint".into(), model: "whisper-large".into() })
@@ -799,6 +843,7 @@ mod tests {
             id: "or".into(),
             name: "OpenRouter".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
+            api: Api::OpenAi,
             models: vec![],
             timeout_secs: 120,
         });
@@ -818,6 +863,31 @@ mod tests {
         // A provider that was removed is an error, not a silent switch to local.
         c.providers.clear();
         assert!(c.cloud_cleanup(&preset).is_err());
+    }
+
+    #[test]
+    fn a_provider_from_before_anthropic_loads_as_openai_and_always_has_a_name() {
+        let old = r#"
+            [[providers]]
+            id = "p-1"
+            name = ""
+            base_url = ""
+            models = [{ name = "gpt-4o-mini", kind = "cleanup" }]
+        "#;
+        let c: Config = toml::from_str(old).unwrap();
+        let p = &c.providers[0];
+        assert_eq!(p.api, Api::OpenAi);
+        assert_eq!(p.models[0].label, None);
+        assert_eq!(p.display_name(), "the unnamed provider");
+        let mut p = p.clone();
+        p.base_url = "https://api.deepseek.com/v1".into();
+        assert_eq!(p.display_name(), "api.deepseek.com");
+        p.name = " DeepSeek ".into();
+        assert_eq!(p.display_name(), "DeepSeek");
+        // No label, nothing written for it.
+        let toml = Config { providers: vec![p], ..Config::default() }.to_toml().unwrap();
+        assert!(!toml.contains("label"), "{toml}");
+        assert!(toml.contains("api = \"openai\""), "{toml}");
     }
 
     #[test]

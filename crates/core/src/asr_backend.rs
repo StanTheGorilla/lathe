@@ -157,6 +157,15 @@ impl OpenAiCompatBackend {
                 "could not reach the transcription endpoint: {other}"
             )),
         })?;
+        // Not followed (see `cloud::agent`), so say what happened rather than fail to
+        // read an empty redirect as JSON.
+        if response.status().is_redirection() {
+            return Err(Rejected::Other(anyhow!(
+                "the transcription endpoint answered with a redirect (HTTP {}), which is \
+                 not followed so the key goes nowhere else. Check the provider's address.",
+                response.status().as_u16()
+            )));
+        }
 
         let text = response
             .body_mut()

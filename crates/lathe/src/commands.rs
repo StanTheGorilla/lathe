@@ -95,10 +95,30 @@ pub fn delete_provider_key(id: String) -> Reply<()> {
     OsKeyStore.delete(provider_id(&id)?).map_err(fail)
 }
 
+/// The provider as saved. The key is read from the credential store by id, and goes
+/// only to the address in the saved config: an address typed into the window but not
+/// saved is refused, so nothing in the window can point the saved key somewhere else.
+/// The window saves before it asks, so a mismatch means that save failed.
+fn saved_provider(
+    provider: &lathe_core::config::Provider,
+    state: &AppState,
+) -> Reply<lathe_core::config::Provider> {
+    provider_id(&provider.id)?;
+    let saved = state.config.lock().unwrap().provider(&provider.id).cloned();
+    match saved {
+        Some(saved)
+            if saved.base_url.trim() == provider.base_url.trim() && saved.api == provider.api =>
+        {
+            Ok(saved)
+        }
+        _ => Err("The address is not saved yet, and only a saved address gets the key. \
+                  Try again in a moment."
+            .into()),
+    }
+}
+
 /// One small request to a model, so a provider can be checked before a dictation
-/// depends on it. The key is read from the credential store by id, and goes only to
-/// the address in the saved config: an address typed into the window but not saved
-/// is refused, so nothing in the window can point the saved key somewhere else.
+/// depends on it.
 #[tauri::command]
 pub async fn test_cloud_model(
     provider: lathe_core::config::Provider,
@@ -106,12 +126,7 @@ pub async fn test_cloud_model(
     kind: lathe_core::config::CloudKind,
     state: State<'_, AppState>,
 ) -> Reply<String> {
-    provider_id(&provider.id)?;
-    let saved = state.config.lock().unwrap().provider(&provider.id).cloned();
-    let provider = match saved {
-        Some(saved) if saved.base_url.trim() == provider.base_url.trim() => saved,
-        _ => return Err("Save changes first: Test uses the saved address.".into()),
-    };
+    let provider = saved_provider(&provider, &state)?;
     tauri::async_runtime::spawn_blocking(move || {
         use lathe_core::config::CloudKind;
         match kind {
@@ -138,6 +153,23 @@ pub async fn test_cloud_model(
                 })
             }
         }
+    })
+    .await
+    .map_err(fail)?
+    .map_err(|e: anyhow::Error| fail(e))
+}
+
+/// The models a provider offers, from its own list, for the window to pick from.
+/// Same rule as Test: the saved address, the stored key.
+#[tauri::command]
+pub async fn list_provider_models(
+    provider: lathe_core::config::Provider,
+    state: State<'_, AppState>,
+) -> Reply<Vec<lathe_core::cloud::Listed>> {
+    let provider = saved_provider(&provider, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = OsKeyStore.get(&provider.id)?;
+        lathe_core::cloud::list_models(&provider, key)
     })
     .await
     .map_err(fail)?
