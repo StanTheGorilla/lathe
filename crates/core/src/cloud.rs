@@ -181,16 +181,40 @@ impl ChatClient {
         })
     }
 
+    fn is_openrouter(&self) -> bool {
+        self.url.contains("openrouter.ai")
+    }
+
     /// `request_body`, plus OpenRouter's reasoning control: a model that thinks before
-    /// it answers is asked to think briefly and not to send the thinking back. For
-    /// dictation that is seconds saved, and the thinking is not the answer anyway.
-    /// OpenRouter ignores it for models that do not reason.
+    /// it answers is told not to think at all. Tidying a transcript needs no thinking,
+    /// and thinking was nearly all of the wait. Measured on dots-3-note (free): with
+    /// `effort: "low"` it thought for 800 to 3500 tokens and answered in 9 to 31 s;
+    /// `effort: "minimal"` still thought for 1000 tokens (10 s), because OpenRouter sizes
+    /// an effort as a share of `max_tokens`. Switched off it thinks for none and
+    /// answers in 2 to 3 s whatever the length, with the same or better text.
+    /// `exclude` only hides the thinking; it is still done and still waited for.
+    /// OpenRouter ignores the switch for models that do not reason.
     fn request_body(&self, prompt: &str, max_tokens: u32) -> serde_json::Value {
         let mut body = request_body(&self.model, prompt, max_tokens);
-        if self.url.contains("openrouter.ai") {
-            body["reasoning"] = serde_json::json!({ "effort": "low", "exclude": true });
+        if self.is_openrouter() {
+            body["reasoning"] = serde_json::json!({ "enabled": false });
         }
         body
+    }
+
+    /// The second try after an HTTP 400. OpenAI's reasoning models refuse `temperature`
+    /// and `max_tokens` outright, so elsewhere the retry drops both. OpenRouter drops
+    /// parameters a model does not take by itself, so its 400 more likely means a model
+    /// that must think and refuses to be told not to; that one is asked to think
+    /// briefly and keep the thinking to itself instead.
+    fn retry_body(&self, prompt: &str, max_tokens: u32) -> serde_json::Value {
+        if self.is_openrouter() {
+            let mut body = request_body(&self.model, prompt, max_tokens);
+            body["reasoning"] = serde_json::json!({ "effort": "low", "exclude": true });
+            body
+        } else {
+            plain_request_body(&self.model, prompt)
+        }
     }
 
     fn call(&self) -> Call<'_> {
@@ -205,12 +229,12 @@ impl ChatClient {
             Api::OpenAi => {
                 let (mut status, mut text) =
                     call.send(&self.url, Some(&self.request_body(prompt, max_tokens)))?;
-                // OpenAI's reasoning models refuse `temperature` and `max_tokens` outright.
-                // Asked again with neither, they answer; anything else that was wrong
-                // with the request is still wrong and says so the second time.
+                // Asked again in the shape `retry_body` gives, a model that refused the
+                // first shape answers; anything else that was wrong with the request is
+                // still wrong and says so the second time.
                 if status == 400 {
                     (status, text) =
-                        call.send(&self.url, Some(&plain_request_body(&self.model, prompt)))?;
+                        call.send(&self.url, Some(&self.retry_body(prompt, max_tokens)))?;
                 }
                 if status != 200 {
                     return Err(call.refusal(&self.url, status, &text));
@@ -316,7 +340,10 @@ pub fn parse_anthropic_reply(text: &str) -> Result<String> {
 ///
 /// At least 8192 whatever the dictation's length: a reasoning model spends tokens
 /// thinking before it writes a word, and with a budget sized to the text alone it
-/// ran out before answering (dots-3-note on OpenRouter, a 21 s dictation).
+/// ran out before answering (dots-3-note on OpenRouter, a 21 s dictation). OpenRouter
+/// now asks for no thinking, but a model that insists on it, or another provider's
+/// model that thinks by default, still needs the room. A limit costs no time: the
+/// model stops when the text is done.
 pub fn max_tokens_for(raw: &str, factor: f32) -> u32 {
     let estimate = raw.chars().count() as f32 / 3.0 * factor;
     (estimate as u32 + 256).clamp(8192, 32768)
@@ -615,11 +642,21 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_is_asked_to_think_briefly() {
+    fn openrouter_is_asked_not_to_think() {
         let or = ChatClient::new(&provider("https://openrouter.ai/api/v1"), "m", None).unwrap();
-        assert_eq!(or.request_body("x", 8192)["reasoning"]["effort"], "low");
+        let body = or.request_body("x", 8192);
+        assert_eq!(body["reasoning"], serde_json::json!({ "enabled": false }));
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["max_tokens"], 8192);
+        // A model that must think is asked again to think briefly, with its limits kept.
+        let retry = or.retry_body("x", 8192);
+        assert_eq!(retry["reasoning"], serde_json::json!({ "effort": "low", "exclude": true }));
+        assert_eq!(retry["max_tokens"], 8192);
+        // Other providers do not know the parameter and get neither.
         let other = ChatClient::new(&provider("https://api.deepseek.com"), "m", None).unwrap();
         assert!(other.request_body("x", 8192).get("reasoning").is_none());
+        let plain = other.retry_body("x", 8192);
+        assert!(plain.get("reasoning").is_none() && plain.get("max_tokens").is_none());
     }
 
     #[test]
