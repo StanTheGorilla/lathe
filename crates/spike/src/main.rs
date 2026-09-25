@@ -952,7 +952,7 @@ fn cloud_cleanup_outputs(
     let mut outputs = Vec::with_capacity(total);
     for (i, item) in items.into_iter().enumerate() {
         let prompt = build_instruct_prompt_for(
-            Turns::Plain, &item.raw, language, item.styling, item.structure, item.context, &[],
+            Turns::Plain, &item.raw, language, item.styling, item.structure, item.context, &[], &[],
         );
         let started = std::time::Instant::now();
         let cleaned = client.complete(&prompt, lathe_core::cloud::max_tokens_for(&item.raw, 2.0))?;

@@ -139,6 +139,7 @@ pub async fn test_cloud_model(
                     "um so this is a test of the the cleanup model",
                     "en",
                     &[],
+                    &[],
                 )?;
                 Ok(format!("It answered: {out}"))
             }

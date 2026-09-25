@@ -420,15 +420,17 @@
           If the cloud fails, use {local ? local.label : "the local model"} instead
           <span class="hint" style="margin:0">
             Off by default, so a failure is reported instead of quietly giving a
-            transcript from a different model. Speech detection always runs here, so
-            silence is never sent.
+            transcript from a different model. Either way it is not loaded until the
+            cloud fails, so it takes no graphics memory before then. Speech detection
+            always runs here, so silence is never sent.
           </span>
         </span>
       </label>
     {:else}
       <p class="hint" style="margin:-2px 0 10px">
         If the cloud fails, {local ? local.label : "the local model"} cleans it instead, and
-        you get a notification.
+        you get a notification. It is loaded only then, which takes a few seconds once,
+        so until then it takes no graphics memory.
       </p>
     {/if}
   {/if}

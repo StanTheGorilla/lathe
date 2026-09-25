@@ -33,6 +33,16 @@ pub enum Processed {
     Rejected(Rejected),
 }
 
+/// The local models a dictation needs resident before it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Needs {
+    speech: bool,
+    s1mini: bool,
+    /// The instruction model: another language, a rewrite, a general model picked for
+    /// English, or the English vocabulary judge.
+    instruct: bool,
+}
+
 pub struct Engine {
     /// Initialised on first use, not at startup. `llama_backend_init` loads the
     /// Vulkan backend and touches the driver, which costs about 12MB of working set
@@ -56,9 +66,13 @@ pub struct Engine {
     /// The warning from the last load whose weights did not fit the card, until
     /// someone takes it to show the user. The log line alone was found to be invisible.
     spill_warning: Option<String>,
-    /// Why the last dictation's cloud cleanup fell back to the local model, until
-    /// someone takes it to show the user. Key already blanked out.
+    /// Why the last dictation's cloud model fell back to the local one, until someone
+    /// takes it to show the user. Key already blanked out.
     cloud_warning: Option<String>,
+    /// The last cloud cleanup failed and a local model was loaded in its place. Kept
+    /// resident until the cloud answers again, so a provider that is down costs one
+    /// load rather than one per dictation.
+    cloud_failing: bool,
     last_used: Instant,
 }
 
@@ -76,6 +90,7 @@ impl Engine {
             gpu: None,
             spill_warning: None,
             cloud_warning: None,
+            cloud_failing: false,
             last_used: Instant::now(),
         })
     }
@@ -87,6 +102,13 @@ impl Engine {
 
     pub fn take_cloud_warning(&mut self) -> Option<String> {
         self.cloud_warning.take()
+    }
+
+    fn warn(&mut self, message: String) {
+        self.cloud_warning = Some(match self.cloud_warning.take() {
+            Some(earlier) => format!("{earlier}\n{message}"),
+            None => message,
+        });
     }
 
     /// The device index and layer count to load a cleanup model with.
@@ -129,30 +151,59 @@ impl Engine {
             && config.vocabulary.context_with_instruction_model
     }
 
-    /// Whether everything *this dictation* needs is resident.
+    /// The local models this dictation needs resident before it starts. A cloud model
+    /// in a slot means nothing local for it: the local one is loaded only if the cloud
+    /// fails, and speech detection needs no model of the recogniser's.
+    fn needs(config: &Config, preset: &Preset) -> Needs {
+        let speech = config.needs_local_speech();
+        if config.cloud_replaces_local_cleanup(preset) {
+            return Needs { speech, s1mini: false, instruct: false };
+        }
+        let english = !Self::wants_instruct(config, preset);
+        Needs {
+            speech,
+            s1mini: english,
+            instruct: !english || Self::judges_with_instruct(config, preset),
+        }
+    }
+
+    /// Local models resident that a cloud model has taken over from, and which only
+    /// hold graphics memory. A cleanup model loaded because the cloud failed stays
+    /// until the cloud answers again; a speech model stays while it is the fallback.
+    fn surplus(&self, config: &Config, preset: &Preset) -> bool {
+        let cleanup = config.cloud_replaces_local_cleanup(preset)
+            && !self.cloud_failing
+            && (self.cleanup.is_some() || self.cleanup_multilingual.is_some());
+        let speech = !config.needs_local_speech()
+            && !config.models.speech_cloud_fallback
+            && self.asr.is_some();
+        cleanup || speech
+    }
+
+    /// Whether everything *this dictation* needs is resident, and nothing a cloud model
+    /// replaced is still holding memory.
     ///
     /// Amendment A21 loads one cleanup model per language, so "loaded" is meaningless
     /// without one: a session that has dictated in English has the speech model and
     /// S1-mini, and still needs Gemma before it can clean a word of Polish.
     pub fn loaded(&self, config: &Config, preset: &Preset) -> bool {
-        if self.asr.is_none() {
+        let needs = Self::needs(config, preset);
+        if needs.speech && self.asr.is_none() {
             return false;
         }
-        // The cloud cleans this one; the local model is loaded only if it fails.
-        if config.cloud_replaces_instruction_model(preset) {
-            return true;
+        if self.surplus(config, preset) {
+            return false;
         }
         let instruct = (self.cleanup_multilingual.is_some() && self.instruct_is(config))
             || self.cleanup_multilingual_missing.as_deref() == Some(config.instruction_model_path().as_path());
-        if Self::wants_instruct(config, preset) {
-            instruct
-        } else {
-            self.cleanup.is_some() && (instruct || !Self::judges_with_instruct(config, preset))
+        if needs.instruct && !instruct {
+            return false;
         }
+        !needs.s1mini || self.cleanup.is_some()
     }
 
-    /// Loads both models if they are not resident, then forces Vulkan shader
-    /// compilation before reporting ready.
+    /// Loads the models this dictation needs if they are not resident, then forces
+    /// Vulkan shader compilation before reporting ready.
     ///
     /// Phase 1 measured roughly 3 seconds of shader compilation on the first inference
     /// after process start, separate from model load. Without this warmup that cost
@@ -173,17 +224,37 @@ impl Engine {
             self.last_used = Instant::now();
             return Ok(());
         }
+        let needs = Self::needs(config, preset);
 
-        // One cleanup model resident at a time. Both together are 3.2 GB beside the
-        // speech model, and on an 8 GB card that other applications also use the second
-        // one lands in system memory and runs 20-40x slower -- Polish cleanup was taking
-        // 35-90 s. Switching language costs a 1-2 s reload instead. The exception is a
-        // user who asked for the instruction model to judge vocabulary in English too.
-        if english && !judge && self.cleanup_multilingual.take().is_some() {
-            eprintln!("instruction model unloaded: switching to S1-mini");
+        if config.cloud_replaces_local_cleanup(preset) {
+            // What frees the graphics memory when a slot is switched to the cloud.
+            if !self.cloud_failing {
+                let s1 = self.cleanup.take().is_some();
+                let instruct = self.cleanup_multilingual.take().is_some();
+                self.cleanup_multilingual_path = None;
+                if s1 || instruct {
+                    eprintln!("local cleanup model unloaded: a cloud model cleans this dictation");
+                }
+            }
+        } else {
+            // One cleanup model resident at a time. Both together are 3.2 GB beside the
+            // speech model, and on an 8 GB card that other applications also use the
+            // second one lands in system memory and runs 20-40x slower -- Polish cleanup
+            // was taking 35-90 s. Switching language costs a 1-2 s reload instead. The
+            // exception is a user who asked for the instruction model to judge
+            // vocabulary in English too.
+            if english && !judge && self.cleanup_multilingual.take().is_some() {
+                eprintln!("instruction model unloaded: switching to S1-mini");
+            }
+            if !english && self.cleanup.take().is_some() {
+                eprintln!("s1-mini unloaded: switching to the instruction model ({language})");
+            }
         }
-        if !english && self.cleanup.take().is_some() {
-            eprintln!("s1-mini unloaded: switching to the instruction model ({language})");
+        if !config.needs_local_speech()
+            && !config.models.speech_cloud_fallback
+            && self.asr.take().is_some()
+        {
+            eprintln!("speech model unloaded: a cloud model recognises speech");
         }
         // English and another language may each name their own instruction model.
         if self.cleanup_multilingual.is_some() && !self.instruct_is(config) {
@@ -192,32 +263,60 @@ impl Engine {
             eprintln!("instruction model unloaded: this language uses a different one");
         }
 
-        self.report_vram(config, english, judge);
+        let mut pending = Vec::new();
+        if needs.speech && self.asr.is_none() {
+            pending.push(config.whisper_path());
+        }
+        if needs.s1mini && self.cleanup.is_none() {
+            pending.push(config.cleanup_path());
+        }
+        if needs.instruct && self.cleanup_multilingual.is_none() {
+            pending.push(config.instruction_model_path());
+        }
+        if pending.is_empty() {
+            // Said, so a log that shows no weights loading is not mistaken for a hang,
+            // and without asking the card: enumerating it costs working set for nothing.
+            eprintln!("graphics memory: no weights to load for this dictation");
+            self.last_used = Instant::now();
+            return Ok(());
+        }
+        self.report_vram(config, &pending);
 
-        if self.asr.is_none() {
+        if needs.speech && self.asr.is_none() {
             progress("Loading speech model");
-            let (asr, ms) = Asr::load(&config.whisper_path(), config.models.threads)?;
-            eprintln!("speech model loaded in {ms}ms on backend '{}'", asr.backend());
-            self.asr = Some(asr);
+            self.load_speech(config)?;
         }
+        self.load_cleanup(config, needs.s1mini, needs.instruct, judge, progress)?;
 
-        if english && self.cleanup.is_none() {
+        progress("Compiling shaders");
+        self.warmup(config, english, judge)?;
+        self.last_used = Instant::now();
+        Ok(())
+    }
+
+    fn load_speech(&mut self, config: &Config) -> Result<()> {
+        let (asr, ms) = Asr::load(&config.whisper_path(), config.models.threads)?;
+        eprintln!("speech model loaded in {ms}ms on backend '{}'", asr.backend());
+        self.asr = Some(asr);
+        Ok(())
+    }
+
+    /// S1-mini and the instruction model, whichever are asked for and not resident.
+    fn load_cleanup(
+        &mut self,
+        config: &Config,
+        s1mini: bool,
+        instruct: bool,
+        judge: bool,
+        progress: &dyn Fn(&str),
+    ) -> Result<()> {
+        let language = config.languages.current();
+        if s1mini && self.cleanup.is_none() {
             progress("Loading cleanup model");
-            let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
-            let backend = Self::backend_mut(&mut self.backend)?;
-            let (cleanup, ms) = Cleanup::load(
-                backend,
-                &config.cleanup_path(),
-                device,
-                layers,
-                crate::cleanup::Flavour::S1Mini,
-            )?;
-            eprintln!("s1-mini loaded in {ms}ms");
-            self.cleanup = Some(cleanup);
+            self.load_s1mini(config)?;
         }
 
-        let cloud = config.cloud_replaces_instruction_model(preset);
-        if (!english || judge) && !cloud && self.cleanup_multilingual.is_none() {
+        if instruct && self.cleanup_multilingual.is_none() {
             let path = config.instruction_model_path();
             if path.exists() {
                 progress("Loading multilingual cleanup model");
@@ -255,45 +354,57 @@ impl Engine {
                 {
                     eprintln!("the rewrite needs that model; cleaning with S1-mini instead");
                     progress("Loading cleanup model");
-                    let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
-                    let backend = Self::backend_mut(&mut self.backend)?;
-                    let (cleanup, ms) = Cleanup::load(
-                        backend,
-                        &config.cleanup_path(),
-                        device,
-                        layers,
-                        crate::cleanup::Flavour::S1Mini,
-                    )?;
-                    eprintln!("s1-mini loaded in {ms}ms");
-                    self.cleanup = Some(cleanup);
+                    self.load_s1mini(config)?;
                 }
             }
         }
-
-        progress("Compiling shaders");
-        self.warmup(config, english, judge)?;
-        self.last_used = Instant::now();
         Ok(())
     }
 
-    /// The instruction model for this language, now, for a dictation the cloud was to
-    /// clean and did not. No warmup: this is the fallback path, already late.
-    fn load_instruction_model(&mut self, config: &Config) -> Result<()> {
-        let path = config.instruction_model_path();
-        if self.cleanup_multilingual.is_some() && self.instruct_is(config) {
-            return Ok(());
-        }
-        if !path.exists() {
-            anyhow::bail!("{} is not downloaded", path.display());
-        }
+    fn load_s1mini(&mut self, config: &Config) -> Result<()> {
         let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
         let backend = Self::backend_mut(&mut self.backend)?;
-        let (cleanup, ms) =
-            Cleanup::load(backend, &path, device, layers, crate::cleanup::Flavour::Instruct)?;
-        eprintln!("instruction model loaded in {ms}ms, after the cloud failed");
-        self.cleanup_multilingual = Some(cleanup);
-        self.cleanup_multilingual_path = Some(path);
-        self.cleanup_multilingual_missing = None;
+        let (cleanup, ms) = Cleanup::load(
+            backend,
+            &config.cleanup_path(),
+            device,
+            layers,
+            crate::cleanup::Flavour::S1Mini,
+        )?;
+        eprintln!("s1-mini loaded in {ms}ms");
+        self.cleanup = Some(cleanup);
+        Ok(())
+    }
+
+    /// The local cleanup model for this dictation, now, for a dictation the cloud was
+    /// to clean and did not: S1-mini for English, the instruction model otherwise. No
+    /// warmup: this is the fallback path, already late.
+    fn load_fallback_cleanup(&mut self, config: &Config, preset: &Preset) -> Result<()> {
+        let english = !Self::wants_instruct(config, preset);
+        let mut pending = Vec::new();
+        if english && self.cleanup.is_none() {
+            pending.push(config.cleanup_path());
+        }
+        if !english && !(self.cleanup_multilingual.is_some() && self.instruct_is(config)) {
+            pending.push(config.instruction_model_path());
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if self.cleanup_multilingual.is_some() && !self.instruct_is(config) {
+            self.cleanup_multilingual = None;
+            self.cleanup_multilingual_path = None;
+        }
+        self.report_vram(config, &pending);
+        let started = Instant::now();
+        self.load_cleanup(config, english, !english, false, &|_| {})?;
+        if self.cleanup_multilingual.is_none() && self.cleanup.is_none() {
+            anyhow::bail!("{} is not downloaded", config.instruction_model_path().display());
+        }
+        eprintln!(
+            "local cleanup model ready in {}ms, after the cloud failed",
+            started.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -301,7 +412,7 @@ impl Engine {
     /// when it will not fit. Weights that spill into system memory make every
     /// dictation 10-40x slower and nothing else says so. Measured before loading,
     /// because afterwards the budget cannot tell spilled weights from resident ones.
-    fn report_vram(&mut self, config: &Config, english: bool, judge: bool) {
+    fn report_vram(&mut self, config: &Config, pending: &[std::path::PathBuf]) {
         let (device, layers) = Self::gpu(&mut self.gpu, config.models.gpu_device);
         if layers == 0 {
             return;
@@ -309,16 +420,6 @@ impl Engine {
         let Some(free) = crate::asr::vram_free(device) else {
             return;
         };
-        let mut pending = Vec::new();
-        if self.asr.is_none() {
-            pending.push(config.whisper_path());
-        }
-        if english && self.cleanup.is_none() {
-            pending.push(config.cleanup_path());
-        }
-        if (!english || judge) && self.cleanup_multilingual.is_none() {
-            pending.push(config.instruction_model_path());
-        }
         let needed: u64 = pending
             .iter()
             .filter_map(|p| std::fs::metadata(p).ok())
@@ -400,10 +501,15 @@ impl Engine {
     pub fn process(&mut self, config: &Config, preset: &Preset, pcm: &[f32]) -> Result<Processed> {
         self.last_used = Instant::now();
 
-        let asr = self.asr.as_ref().context("speech model is not loaded")?;
-
-        // Brief 6.1: never call the model on silence.
-        let Some(gated) = asr.gate(pcm, &config.vad_path(), config.audio.min_speech_ms)? else {
+        // Brief 6.1: never call the model on silence. Runs without the speech model,
+        // which a cloud recogniser leaves unloaded.
+        let Some(gated) = Asr::gate_with(
+            pcm,
+            &config.vad_path(),
+            config.audio.min_speech_ms,
+            config.models.threads,
+        )?
+        else {
             return Ok(Processed::Rejected(Rejected::NoSpeech));
         };
 
@@ -413,7 +519,6 @@ impl Engine {
         let vocabulary = config.vocabulary.for_preset(&preset.vocabulary_sets);
         // Amendment A29: the language is a global switch, not a property of the preset.
         let lang = config.languages.current();
-        asr.set_hotwords(&vocabulary.hotwords(128), config.vocabulary.hotword_boost);
 
         // Brief 4.3: the external endpoint, when configured, replaces local recognition.
         // The VAD gate above still runs locally, so silence is never uploaded.
@@ -429,6 +534,18 @@ impl Engine {
                 Ok(text) => (text, started.elapsed().as_millis()),
                 Err(e) if config.models.speech_cloud_fallback => {
                     eprintln!("remote transcription failed, falling back to local: {e:#}");
+                    // Not loaded up front, since the cloud was to do it. Slow once.
+                    if self.asr.is_none() {
+                        self.report_vram(config, &[config.whisper_path()]);
+                        self.load_speech(config)?;
+                    }
+                    self.warn(format!(
+                        "Speech: {model} at {} failed, so the local speech model \
+                         recognised this dictation instead. {e:#}",
+                        provider.display_name()
+                    ));
+                    let asr = self.asr.as_ref().context("speech model is not loaded")?;
+                    asr.set_hotwords(&vocabulary.hotwords(128), config.vocabulary.hotword_boost);
                     let t = asr.transcribe(&gated.pcm, lang)?;
                     (t.text, t.infer_ms)
                 }
@@ -436,6 +553,8 @@ impl Engine {
                 Err(e) => return Err(e),
             }
         } else {
+            let asr = self.asr.as_ref().context("speech model is not loaded")?;
+            asr.set_hotwords(&vocabulary.hotwords(128), config.vocabulary.hotword_boost);
             let t = asr.transcribe(&gated.pcm, lang)?;
             (t.text, t.infer_ms)
         };
@@ -447,57 +566,23 @@ impl Engine {
         // The words only the sentence can settle -- "cloud" as the word or as "Claude"
         // -- are put to whichever cleanup model this dictation loaded, as the sentence
         // both ways. It works on text, so it does the same job behind every speech
-        // model, including those that ignore pass 1 entirely.
-        let judge_model = if Self::wants_instruct(config, preset)
-            || Self::judges_with_instruct(config, preset)
-        {
-            self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
+        // model, including those that ignore pass 1 entirely. A cloud model cleaning
+        // this dictation settles them itself instead, told which words they are: no
+        // local model is loaded to ask, and writing every one as the term would turn
+        // "the cloud" into "the Claude".
+        let cloud_cleans = config.cloud_replaces_local_cleanup(preset);
+        let cloud_settles = cloud_cleans && vocabulary.context;
+        let heard = text;
+        let (text, corrections) = if cloud_settles {
+            vocabulary.correct_leaving_open(&heard)
         } else {
-            self.cleanup.as_ref()
-        };
-        let (text, corrections) = match (judge_model, &self.backend) {
-            (Some(model), Some(backend)) if vocabulary.context => {
-                let margin = vocabulary.context_margin;
-                let threads = config.models.threads;
-                let known = vocabulary.terms(64);
-                vocabulary.correct_in_context(&text, &mut |choice| {
-                    // The term in question is always among those the judge is told of,
-                    // even past the cap.
-                    let mut terms = known.clone();
-                    if !terms.iter().any(|t| t.eq_ignore_ascii_case(&choice.term)) {
-                        terms.push(choice.term.clone());
-                    }
-                    match model.log_likelihoods(
-                        backend,
-                        &[&choice.as_heard, &choice.as_term],
-                        &terms,
-                        threads,
-                    ) {
-                        Ok(scores) => {
-                            let take = choice.decide(scores[0], scores[1], margin);
-                            eprintln!(
-                                "vocabulary: '{}' or '{}'? {:+.2} -> {}",
-                                choice.heard,
-                                choice.term,
-                                scores[1] - scores[0],
-                                if take { &choice.term } else { &choice.heard }
-                            );
-                            Some(take)
-                        }
-                        Err(e) => {
-                            eprintln!("vocabulary: could not weigh '{}': {e:#}", choice.heard);
-                            None
-                        }
-                    }
-                })
-            }
-            _ => vocabulary.correct(&text),
+            self.weigh(config, preset, &vocabulary, &heard)
         };
         if corrections > 0 {
             eprintln!("vocabulary: {corrections} correction(s)");
         }
 
-        let transcript = crate::asr::Transcript {
+        let mut transcript = crate::asr::Transcript {
             text,
             infer_ms: asr_ms,
             audio_secs: gated.pcm.len() as f32 / crate::audio::TARGET_RATE as f32,
@@ -513,16 +598,24 @@ impl Engine {
         // A33 sends a rewrite preset through that same model in any language.
         // A cloud model first, when one is picked for this dictation's slot. Whatever
         // goes wrong there, the local model cleans it instead and the user is told.
+        let mut cloud_failure = None;
         let cloud = if preset.cleanup {
             let terms = vocabulary.terms(64);
+            let named = if cloud_settles { vocabulary.named_forms(32) } else { Vec::new() };
             match config.cloud_cleanup(preset) {
                 Ok(Some((provider, model))) => {
                     let started = Instant::now();
-                    match cloud_clean(provider, &model, preset, &transcript.text, lang, &terms) {
-                        Ok(text) => Some((text, started.elapsed().as_millis())),
+                    match cloud_clean(provider, &model, preset, &transcript.text, lang, &terms, &named) {
+                        Ok(text) => {
+                            self.cloud_failing = false;
+                            Some((text, started.elapsed().as_millis()))
+                        }
                         Err(e) => {
                             eprintln!("cloud cleanup with '{model}' failed, cleaning locally: {e:#}");
-                            self.cloud_warning = Some(format!("{e:#}"));
+                            cloud_failure = Some(format!(
+                                "{model} at {} failed. {e:#}",
+                                provider.display_name()
+                            ));
                             None
                         }
                     }
@@ -530,19 +623,36 @@ impl Engine {
                 Ok(None) => None,
                 Err(e) => {
                     eprintln!("{e:#}; cleaning locally");
-                    self.cloud_warning = Some(format!("{e:#}"));
+                    cloud_failure = Some(format!("{e:#}."));
                     None
                 }
             }
         } else {
             None
         };
-        if cloud.is_none() && config.cloud_replaces_instruction_model(preset) {
+        if let Some(why) = cloud_failure {
+            self.cloud_failing = true;
             // Not loaded up front because the cloud was to do it. Slow once; a missing
             // file leaves the transcript uncleaned, as it would without the cloud.
-            if let Err(e) = self.load_instruction_model(config) {
-                eprintln!("could not load the local instruction model: {e:#}");
+            let fallback = self.load_fallback_cleanup(config, preset);
+            if let Err(e) = &fallback {
+                eprintln!("could not load the local cleanup model: {e:#}");
             }
+            // The words the cloud was to settle, weighed by the local model instead.
+            if cloud_settles {
+                let (text, corrections) = self.weigh(config, preset, &vocabulary, &heard);
+                if corrections > 0 {
+                    eprintln!("vocabulary: {corrections} correction(s), weighed locally");
+                }
+                transcript.text = text;
+            }
+            self.warn(match fallback {
+                Ok(()) => format!("Cleanup: {why} The local model cleaned this dictation instead."),
+                Err(e) => format!(
+                    "Cleanup: {why} The local model could not be loaded either ({e:#}), so this \
+                     dictation was pasted uncleaned."
+                ),
+            });
         }
 
         let (cleaned, cleanup_ms) = if let Some(done) = cloud {
@@ -619,6 +729,63 @@ impl Engine {
             vad_ms: gated.vad_ms,
         })))
     }
+
+    /// Pass 2 with the local judge: whichever cleanup model this dictation loaded
+    /// weighs each open word as the sentence both ways. Without one, or with context
+    /// off, the words go the way they did before the judge existed.
+    fn weigh(
+        &self,
+        config: &Config,
+        preset: &Preset,
+        vocabulary: &crate::vocabulary::Vocabulary,
+        text: &str,
+    ) -> (String, usize) {
+        let judge_model = if Self::wants_instruct(config, preset)
+            || Self::judges_with_instruct(config, preset)
+        {
+            self.cleanup_multilingual.as_ref().or(self.cleanup.as_ref())
+        } else {
+            self.cleanup.as_ref()
+        };
+        match (judge_model, &self.backend) {
+            (Some(model), Some(backend)) if vocabulary.context => {
+                let margin = vocabulary.context_margin;
+                let threads = config.models.threads;
+                let known = vocabulary.terms(64);
+                vocabulary.correct_in_context(text, &mut |choice| {
+                    // The term in question is always among those the judge is told of,
+                    // even past the cap.
+                    let mut terms = known.clone();
+                    if !terms.iter().any(|t| t.eq_ignore_ascii_case(&choice.term)) {
+                        terms.push(choice.term.clone());
+                    }
+                    match model.log_likelihoods(
+                        backend,
+                        &[&choice.as_heard, &choice.as_term],
+                        &terms,
+                        threads,
+                    ) {
+                        Ok(scores) => {
+                            let take = choice.decide(scores[0], scores[1], margin);
+                            eprintln!(
+                                "vocabulary: '{}' or '{}'? {:+.2} -> {}",
+                                choice.heard,
+                                choice.term,
+                                scores[1] - scores[0],
+                                if take { &choice.term } else { &choice.heard }
+                            );
+                            Some(take)
+                        }
+                        Err(e) => {
+                            eprintln!("vocabulary: could not weigh '{}': {e:#}", choice.heard);
+                            None
+                        }
+                    }
+                })
+            }
+            _ => vocabulary.correct(text),
+        }
+    }
 }
 
 
@@ -654,6 +821,7 @@ pub fn cloud_transcribe(
 }
 
 /// Cleanup through a cloud model, with the prompt the local instruction model gets.
+/// `named` is the vocabulary's named spoken forms, for the model to settle.
 pub fn cloud_clean(
     provider: &crate::config::Provider,
     model: &str,
@@ -661,6 +829,7 @@ pub fn cloud_clean(
     text: &str,
     lang: &str,
     terms: &[String],
+    named: &[(String, String)],
 ) -> Result<String> {
     use crate::cleanup::{build_instruct_prompt_for, build_rewrite_prompt_for, Rewrite, Turns};
     use crate::secrets::KeyStore;
@@ -669,10 +838,10 @@ pub fn cloud_clean(
     let client = crate::cloud::ChatClient::new(provider, model, key)?;
     let language = language_name(lang);
     let prompt = if preset.rewrite != Rewrite::Off {
-        build_rewrite_prompt_for(Turns::Plain, text, language, preset.rewrite, preset.styling, terms)
+        build_rewrite_prompt_for(Turns::Plain, text, language, preset.rewrite, preset.styling, terms, named)
     } else {
         build_instruct_prompt_for(
-            Turns::Plain, text, language, preset.styling, preset.structure, preset.context, terms,
+            Turns::Plain, text, language, preset.styling, preset.structure, preset.context, terms, named,
         )
     };
     // The local instruction model's budget: lists and email layout run longer.
@@ -729,6 +898,64 @@ mod tests {
         config.vocabulary.context = true;
         config.languages.active = "pl".into();
         assert!(!Engine::judges_with_instruct(&config, &preset));
+    }
+
+    fn cloud(model: &str) -> Option<crate::config::CloudChoice> {
+        Some(crate::config::CloudChoice { provider: "or".into(), model: model.into() })
+    }
+
+    #[test]
+    fn a_cloud_model_in_the_slot_means_no_local_cleanup_model_in_english_too() {
+        let mut config = Config::default();
+        let preset = config.active().clone();
+        assert_eq!(
+            Engine::needs(&config, &preset),
+            Needs { speech: true, s1mini: true, instruct: false }
+        );
+        config.models.cleanup_cloud = cloud("gpt-4.1-mini");
+        // Not even as the vocabulary judge: the cloud model is told the named forms.
+        config.vocabulary.context_with_instruction_model = true;
+        assert_eq!(
+            Engine::needs(&config, &preset),
+            Needs { speech: true, s1mini: false, instruct: false }
+        );
+        // Polish uses the other slot, which is still local.
+        config.languages.active = "pl".into();
+        assert_eq!(
+            Engine::needs(&config, &preset),
+            Needs { speech: true, s1mini: false, instruct: true }
+        );
+        config.models.cleanup_multilingual_cloud = cloud("gpt-4.1-mini");
+        config.models.whisper_cloud = cloud("whisper-1");
+        assert_eq!(
+            Engine::needs(&config, &preset),
+            Needs { speech: false, s1mini: false, instruct: false }
+        );
+        // Raw is not cleaned, so its judge is local as before.
+        let mut raw = preset.clone();
+        raw.cleanup = false;
+        assert!(Engine::needs(&config, &raw).instruct);
+    }
+
+    #[test]
+    fn with_every_slot_in_the_cloud_nothing_is_loaded() {
+        let mut config = Config::default();
+        // No file exists here: anything that tried to load one would fail.
+        config.models.dir = std::env::temp_dir().join("lathe-no-models-here");
+        config.models.whisper_cloud = cloud("whisper-1");
+        config.models.cleanup_cloud = cloud("gpt-4.1-mini");
+        let preset = config.active().clone();
+        let mut engine = Engine::new().unwrap();
+        assert!(engine.loaded(&config, &preset));
+        engine.ensure_loaded(&config, &preset, &|step| panic!("{step}")).unwrap();
+        assert!(engine.asr.is_none() && engine.cleanup.is_none() && engine.cleanup_multilingual.is_none());
+        assert!(engine.backend.is_none(), "the GPU backend was started for nothing");
+        // With the fallback on, the speech model still waits for a failure.
+        config.models.speech_cloud_fallback = true;
+        assert!(engine.loaded(&config, &preset));
+        // Back to local speech: now it is needed.
+        config.models.whisper_cloud = None;
+        assert!(!engine.loaded(&config, &preset));
     }
 
     #[test]

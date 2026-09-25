@@ -198,6 +198,33 @@ impl Vocabulary {
             .collect()
     }
 
+    /// The spoken forms the user named, as (heard, term), for a cleanup model that
+    /// settles them itself from the sentence: a cloud model, when no local one is
+    /// loaded to weigh them first. Capped like the terms, and for the same reason.
+    pub fn named_forms(&self, limit: usize) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for term in self.enabled_terms() {
+            for form in &term.heard {
+                let form = form.trim();
+                if form.is_empty() || form.eq_ignore_ascii_case(term.write.trim()) {
+                    continue;
+                }
+                if out.iter().any(|(h, _)| h.eq_ignore_ascii_case(form)) {
+                    continue;
+                }
+                out.push((form.to_string(), term.write.trim().to_string()));
+            }
+        }
+        out.truncate(limit);
+        out
+    }
+
+    /// Pass 2, leaving every word only the sentence can settle as it was heard, named
+    /// or not. For when a model that reads the whole sentence decides those later.
+    pub fn correct_leaving_open(&self, text: &str) -> (String, usize) {
+        self.correct_in_context(text, &mut |_| Some(false))
+    }
+
     /// Pass 2. Returns the corrected text and how many words changed.
     ///
     /// With nothing to judge context, a word only the sentence could settle goes the
@@ -787,6 +814,59 @@ mod tests {
 
     fn vocab() -> Vocabulary {
         Vocabulary::default()
+    }
+
+    #[test]
+    fn named_forms_are_listed_for_a_model_that_reads_the_sentence() {
+        let vocab = Vocabulary {
+            sets: vec![
+                Set {
+                    name: "on".into(),
+                    enabled: true,
+                    terms: vec![
+                        Term::heard("Claude", &["cloud", " Cloud ", "claude"]),
+                        Term::heard("Lathe", &["latte", "Lata"]),
+                        Term::new("Rust"),
+                    ],
+                },
+                Set {
+                    name: "off".into(),
+                    enabled: false,
+                    terms: vec![Term::heard("Vite", &["vote"])],
+                },
+            ],
+            ..Vocabulary::default()
+        };
+        assert_eq!(
+            vocab.named_forms(64),
+            vec![
+                ("cloud".to_string(), "Claude".to_string()),
+                ("latte".to_string(), "Lathe".to_string()),
+                ("Lata".to_string(), "Lathe".to_string()),
+            ]
+        );
+        assert_eq!(vocab.named_forms(1).len(), 1);
+        assert!(Vocabulary { sets: vec![], ..Vocabulary::default() }.named_forms(64).is_empty());
+    }
+
+    #[test]
+    fn leaving_open_keeps_a_named_english_word_for_the_cloud_to_settle() {
+        let vocab = Vocabulary {
+            sets: vec![Set {
+                name: "names".into(),
+                enabled: true,
+                terms: vec![Term::heard("Claude", &["cloud"]), Term::heard("Lathe", &["Lata"])],
+            }],
+            ..Vocabulary::default()
+        };
+        // Without a judge, a named form becomes the term: what the user asked for when
+        // nothing else can read the sentence.
+        assert_eq!(vocab.correct("I asked cloud about Lata").0, "I asked Claude about Lathe");
+        // With a cloud model to read it, "cloud" is left for it; "Lata" is no English
+        // word, so nothing could have meant it and it is still fixed.
+        let (text, n) = vocab.correct_leaving_open("I asked cloud about Lata");
+        assert_eq!(text, "I asked cloud about Lathe");
+        assert_eq!(n, 1);
     }
 
     #[test]

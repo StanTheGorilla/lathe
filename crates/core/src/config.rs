@@ -637,12 +637,22 @@ impl Config {
         self.languages.current().eq_ignore_ascii_case("en") && preset.rewrite == Rewrite::Off
     }
 
-    /// Whether a cloud model cleans this dictation outside the English slot. Then no
-    /// local instruction model is loaded for it: one is loaded only if the cloud fails.
-    pub fn cloud_replaces_instruction_model(&self, preset: &Preset) -> bool {
+    /// Whether a cloud model cleans this dictation. Then no local cleanup model is
+    /// loaded for it, in either slot: one is loaded only if the cloud fails.
+    pub fn cloud_replaces_local_cleanup(&self, preset: &Preset) -> bool {
         preset.cleanup
-            && !self.cloud_cleanup_is_english(preset)
-            && self.models.cleanup_multilingual_cloud.is_some()
+            && if self.cloud_cleanup_is_english(preset) {
+                self.models.cleanup_cloud.is_some()
+            } else {
+                self.models.cleanup_multilingual_cloud.is_some()
+            }
+    }
+
+    /// Whether the local speech model has to be loaded before a dictation: not when a
+    /// cloud model recognises speech. With the fallback on, it is loaded if the cloud
+    /// fails, not before.
+    pub fn needs_local_speech(&self) -> bool {
+        self.models.whisper_cloud.is_none()
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -847,15 +857,22 @@ mod tests {
             models: vec![],
             timeout_secs: 120,
         });
+        let mut preset = c.active().clone();
+        assert!(!c.cloud_replaces_local_cleanup(&preset));
         c.models.cleanup_cloud = Some(CloudChoice { provider: "or".into(), model: "en-model".into() });
+        assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "en-model");
+        // English too: no S1-mini beside a cloud model.
+        assert!(c.cloud_replaces_local_cleanup(&preset));
+        preset.rewrite = Rewrite::Prompt;
+        assert!(!c.cloud_replaces_local_cleanup(&preset));
         c.models.cleanup_multilingual_cloud =
             Some(CloudChoice { provider: "or".into(), model: "other-model".into() });
-        let mut preset = c.active().clone();
-        assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "en-model");
-        assert!(!c.cloud_replaces_instruction_model(&preset));
-        preset.rewrite = Rewrite::Prompt;
         assert_eq!(c.cloud_cleanup(&preset).unwrap().unwrap().1, "other-model");
-        assert!(c.cloud_replaces_instruction_model(&preset));
+        assert!(c.cloud_replaces_local_cleanup(&preset));
+        // Raw is never cleaned, so nothing replaces anything.
+        preset.cleanup = false;
+        assert!(!c.cloud_replaces_local_cleanup(&preset));
+        preset.cleanup = true;
         preset.rewrite = Rewrite::Off;
         c.languages.secondary = "pl".into();
         c.languages.active = "pl".into();
@@ -888,6 +905,17 @@ mod tests {
         let toml = Config { providers: vec![p], ..Config::default() }.to_toml().unwrap();
         assert!(!toml.contains("label"), "{toml}");
         assert!(toml.contains("api = \"openai\""), "{toml}");
+    }
+
+    #[test]
+    fn a_cloud_speech_model_means_no_local_one_up_front() {
+        let mut c = Config::default();
+        assert!(c.needs_local_speech());
+        c.models.whisper_cloud = Some(CloudChoice { provider: "or".into(), model: "whisper-1".into() });
+        assert!(!c.needs_local_speech());
+        // The fallback loads it when the cloud fails, not before.
+        c.models.speech_cloud_fallback = true;
+        assert!(!c.needs_local_speech());
     }
 
     #[test]
